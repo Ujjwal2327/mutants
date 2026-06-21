@@ -7,7 +7,7 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Mutants",
+  title: "Refom",
   description:
     "Convert any file format entirely in your browser. Nothing is uploaded anywhere.",
 };

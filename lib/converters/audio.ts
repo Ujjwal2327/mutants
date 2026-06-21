@@ -58,7 +58,7 @@ export async function convertAudio(
       await ff.writeFile(inName, new Uint8Array(await file.arrayBuffer()))
       await ff.exec(['-i', inName, ...buildAudioArgs(outputFormat), outName])
       const data = await ff.readFile(outName)
-      return new Blob([data as Uint8Array], { type: AUDIO_MIME[outputFormat] ?? 'audio/mpeg' })
+      return new Blob([new Uint8Array(data as Uint8Array)], { type: AUDIO_MIME[outputFormat] ?? 'audio/mpeg' })
     } finally {
       ff.off('progress', handleProgress)
       await ff.deleteFile(inName).catch(() => { /* ignore */ })
