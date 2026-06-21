@@ -1,0 +1,13 @@
+{
+  "id": 1,
+  "name": "Ujjwal",
+  "email": "ujjwal@example.com",
+  "phone": "+91-9876543210",
+  "address": {
+    "city": "Noida",
+    "state": "Uttar Pradesh",
+    "country": "India"
+  },
+  "skills": ["Java", "Spring Boot", "Next.js"],
+  "isActive": true
+}
