@@ -32,29 +32,34 @@ export const FORMAT_REGISTRY: Record<string, FormatInfo> = {
 
   // ── Documents ───────────────────────────────────────────────────────────────
   docx: { group: 'Document', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', targets: ['html', 'txt', 'md', 'pdf', 'rtf'], converterModule: 'document' },
-  md: { group: 'Document', mimeType: 'text/markdown', targets: ['html', 'txt', 'pdf', 'docx'], converterModule: 'document' },
-  html: { group: 'Document', mimeType: 'text/html', targets: ['md', 'txt', 'pdf', 'docx'], converterModule: 'document' },
-  htm: { group: 'Document', mimeType: 'text/html', targets: ['md', 'txt', 'pdf', 'docx'], converterModule: 'document' },
+  // FIX: added 'rtf' to html, htm, md, odt targets — the converter already
+  // supports these paths but they were missing from the registry.
+  md: { group: 'Document', mimeType: 'text/markdown', targets: ['html', 'txt', 'pdf', 'docx', 'rtf'], converterModule: 'document' },
+  html: { group: 'Document', mimeType: 'text/html', targets: ['md', 'txt', 'pdf', 'docx', 'rtf'], converterModule: 'document' },
+  htm: { group: 'Document', mimeType: 'text/html', targets: ['md', 'txt', 'pdf', 'docx', 'rtf'], converterModule: 'document' },
   txt: { group: 'Document', mimeType: 'text/plain', targets: ['html', 'md', 'pdf', 'docx', 'rtf'], converterModule: 'document' },
   rtf: { group: 'Document', mimeType: 'application/rtf', targets: ['txt', 'html', 'md', 'pdf', 'docx'], converterModule: 'document' },
-  odt: { group: 'Document', mimeType: 'application/vnd.oasis.opendocument.text', targets: ['txt', 'html', 'md', 'pdf', 'docx'], converterModule: 'document' },
+  odt: { group: 'Document', mimeType: 'application/vnd.oasis.opendocument.text', targets: ['txt', 'html', 'md', 'pdf', 'docx', 'rtf'], converterModule: 'document' },
 
   // ── Data ────────────────────────────────────────────────────────────────────
+  // FIX: expanded targets for all data formats — the converter already supports these
+  // paths via the parse → output pipeline; they were simply missing from the registry.
   json: { group: 'Data', mimeType: 'application/json', targets: ['csv', 'tsv', 'yaml', 'xml', 'toml', 'ini', 'properties', 'ndjson'], converterModule: 'data' },
   yaml: { group: 'Data', mimeType: 'application/x-yaml', targets: ['json', 'csv', 'tsv', 'xml', 'toml', 'ini', 'properties', 'ndjson'], converterModule: 'data' },
   yml: { group: 'Data', mimeType: 'application/x-yaml', targets: ['json', 'csv', 'tsv', 'xml', 'toml', 'ini', 'properties', 'ndjson'], converterModule: 'data' },
-  xml: { group: 'Data', mimeType: 'application/xml', targets: ['json', 'csv', 'tsv', 'yaml', 'toml', 'ini'], converterModule: 'data' },
-  toml: { group: 'Data', mimeType: 'application/toml', targets: ['json', 'yaml', 'xml', 'ini', 'properties'], converterModule: 'data' },
-  ini: { group: 'Data', mimeType: 'text/plain', targets: ['json', 'yaml', 'toml', 'properties'], converterModule: 'data' },
-  properties: { group: 'Data', mimeType: 'text/plain', targets: ['json', 'yaml', 'ini', 'toml'], converterModule: 'data' },
-  ndjson: { group: 'Data', mimeType: 'application/x-ndjson', targets: ['json', 'csv', 'tsv', 'yaml', 'xml'], converterModule: 'data' },
+  xml: { group: 'Data', mimeType: 'application/xml', targets: ['json', 'csv', 'tsv', 'yaml', 'toml', 'ini', 'properties', 'ndjson'], converterModule: 'data' },
+  toml: { group: 'Data', mimeType: 'application/toml', targets: ['json', 'yaml', 'xml', 'csv', 'tsv', 'ini', 'properties', 'ndjson'], converterModule: 'data' },
+  ini: { group: 'Data', mimeType: 'text/plain', targets: ['json', 'yaml', 'toml', 'xml', 'csv', 'tsv', 'properties', 'ndjson'], converterModule: 'data' },
+  properties: { group: 'Data', mimeType: 'text/plain', targets: ['json', 'yaml', 'ini', 'toml', 'xml', 'csv', 'tsv', 'ndjson'], converterModule: 'data' },
+  ndjson: { group: 'Data', mimeType: 'application/x-ndjson', targets: ['json', 'csv', 'tsv', 'yaml', 'xml', 'toml', 'ini', 'properties'], converterModule: 'data' },
 
   // ── Archives ────────────────────────────────────────────────────────────────
   zip: { group: 'Archive', mimeType: 'application/zip', targets: ['tar', 'gz'], converterModule: 'archive' },
   gz: { group: 'Archive', mimeType: 'application/gzip', targets: ['zip', 'tar'], converterModule: 'archive' },
   gzip: { group: 'Archive', mimeType: 'application/gzip', targets: ['zip', 'tar'], converterModule: 'archive' },
   tar: { group: 'Archive', mimeType: 'application/x-tar', targets: ['zip', 'gz'], converterModule: 'archive' },
-  tgz: { group: 'Archive', mimeType: 'application/x-tar', targets: ['zip', 'tar'], converterModule: 'archive' },
+  // FIX: added 'gz' target for tgz — a .tgz file IS a .tar.gz so outputting as .gz is lossless
+  tgz: { group: 'Archive', mimeType: 'application/x-tar', targets: ['zip', 'tar', 'gz'], converterModule: 'archive' },
 
   // ── Fonts ───────────────────────────────────────────────────────────────────
   ttf: { group: 'Font', mimeType: 'font/ttf', targets: ['otf', 'woff', 'woff2'], converterModule: 'font' },
@@ -76,8 +81,6 @@ export const FORMAT_REGISTRY: Record<string, FormatInfo> = {
   ra: { group: 'Audio', mimeType: 'audio/vnd.rn-realaudio', targets: ['mp3', 'wav', 'ogg', 'aac', 'm4a'], converterModule: 'audio' },
 
   // ── Video ───────────────────────────────────────────────────────────────────
-  // NOTE: .ts (MPEG-2 Transport Stream) is listed here — NOT TypeScript files.
-  // TypeScript .ts source files are unsupported by design (no sensible conversion target).
   mp4: { group: 'Video', mimeType: 'video/mp4', targets: ['webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'wmv'], converterModule: 'video' },
   webm: { group: 'Video', mimeType: 'video/webm', targets: ['mp4', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v'], converterModule: 'video' },
   mkv: { group: 'Video', mimeType: 'video/x-matroska', targets: ['mp4', 'webm', 'avi', 'mov', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v'], converterModule: 'video' },
@@ -86,7 +89,7 @@ export const FORMAT_REGISTRY: Record<string, FormatInfo> = {
   flv: { group: 'Video', mimeType: 'video/x-flv', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', '3gp'], converterModule: 'video' },
   '3gp': { group: 'Video', mimeType: 'video/3gpp', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv'], converterModule: 'video' },
   wmv: { group: 'Video', mimeType: 'video/x-ms-wmv', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp'], converterModule: 'video' },
-  'video-ts': { group: 'Video', mimeType: 'video/mp2t', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp'], converterModule: 'video' },
+  ts: { group: 'Video', mimeType: 'video/mp2t', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp'], converterModule: 'video' },
   m4v: { group: 'Video', mimeType: 'video/x-m4v', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp'], converterModule: 'video' },
   ogv: { group: 'Video', mimeType: 'video/ogg', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav'], converterModule: 'video' },
 }
@@ -95,12 +98,14 @@ export const FORMAT_GROUPS: FormatGroup[] = [
   { label: 'Image', formats: ['png', 'jpeg', 'webp', 'bmp', 'gif', 'avif', 'ico', 'cur', 'svg', 'tiff'] },
   { label: 'PDF', formats: ['pdf'] },
   { label: 'Spreadsheet', formats: ['xlsx', 'xls', 'ods', 'csv', 'tsv', 'xlsb'] },
-  { label: 'Document', formats: ['docx', 'odt', 'md', 'html', 'txt', 'rtf'] },
+  // FIX: added 'htm' to Document group — it is a valid input format in the registry
+  // but was missing from the display list, so users couldn't see it was supported.
+  { label: 'Document', formats: ['docx', 'odt', 'md', 'html', 'htm', 'txt', 'rtf'] },
   { label: 'Data', formats: ['json', 'yaml', 'yml', 'xml', 'toml', 'ini', 'properties', 'ndjson'] },
   { label: 'Archive', formats: ['zip', 'gz', 'gzip', 'tar', 'tgz'] },
   { label: 'Font', formats: ['ttf', 'otf', 'woff', 'woff2'] },
   { label: 'Audio', formats: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'wma', 'aiff', 'caf', 'ra'] },
-  { label: 'Video', formats: ['mp4', 'webm', 'mkv', 'avi', 'mov', 'flv', '3gp', 'wmv', 'm4v', 'ogv'] },
+  { label: 'Video', formats: ['mp4', 'webm', 'mkv', 'avi', 'mov', 'flv', '3gp', 'wmv', 'ts', 'm4v', 'ogv'] },
 ]
 
 export function getExtension(file: File): string {
@@ -116,16 +121,15 @@ export function getTargets(inputExt: string): string[] {
 }
 
 export function buildOutputFilename(originalName: string, outputFormat: string): string {
-  const base = originalName.substring(0, originalName.lastIndexOf('.'))
+  const dotIdx = originalName.lastIndexOf('.')
+  const base = dotIdx >= 0 ? originalName.substring(0, dotIdx) : originalName
   return `${base}.${outputFormat}`
 }
 
 // ── Conversion time estimate ──────────────────────────────────────────────────
-// Video/audio use ffmpeg.wasm (single-threaded), which is ~20-50× slower than
-// native ffmpeg. Estimates reflect real-world browser performance.
 const BASE_MS_BY_MODULE: Record<string, { base: number; perMb: number }> = {
-  video: { base: 8000, perMb: 12000 }, // ~3-5 min for a 25 MB video
-  audio: { base: 3000, perMb: 4000 }, // ~1-2 min for large audio
+  video: { base: 8000, perMb: 12000 },
+  audio: { base: 3000, perMb: 4000 },
   pdf: { base: 500, perMb: 220 },
   archive: { base: 300, perMb: 140 },
   spreadsheet: { base: 300, perMb: 110 },

@@ -6,11 +6,21 @@ export async function convertSpreadsheet(file: File, outputFormat: string): Prom
   let wb: ReturnType<typeof XLSX.read>
 
   if (ext === 'csv') {
-    wb = XLSX.read(await fileToText(file), { type: 'string' })
+    // FIX (MEDIUM): strip UTF-8 BOM (0xEF 0xBB 0xBF) that Excel adds to CSV
+    // exports. Without this the first column header gets a \uFEFF prefix.
+    let text = await fileToText(file)
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1)
+    wb = XLSX.read(text, { type: 'string' })
   } else if (ext === 'tsv') {
-    wb = XLSX.read(await fileToText(file), { type: 'string', FS: '\t' })
+    let text = await fileToText(file)
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1)
+    wb = XLSX.read(text, { type: 'string', FS: '\t' })
   } else {
-    wb = XLSX.read(new Uint8Array(await fileToArrayBuffer(file)), { type: 'array' })
+    // FIX: cellDates:true converts Excel date serial numbers (e.g. 44927) to
+    // JavaScript Date objects so that flat outputs (CSV, JSON, TSV, HTML, TXT)
+    // show human-readable dates like "2023-01-01" instead of raw numbers.
+    // cellNF:true preserves the original number format string for reference.
+    wb = XLSX.read(new Uint8Array(await fileToArrayBuffer(file)), { type: 'array', cellDates: true, cellNF: true })
   }
 
   // ── Workbook-preserving outputs (all sheets kept) ─────────────────────────
@@ -28,8 +38,6 @@ export async function convertSpreadsheet(file: File, outputFormat: string): Prom
   }
 
   // ── Flat/tabular outputs (CSV, TSV, JSON, HTML, TXT) ──────────────────────
-  // For single-sheet workbooks, output directly.
-  // For multi-sheet workbooks, zip all sheets together.
   if (['csv', 'tsv', 'json', 'html', 'txt'].includes(outputFormat)) {
     const sheetNames = wb.SheetNames
 
@@ -54,6 +62,27 @@ export async function convertSpreadsheet(file: File, outputFormat: string): Prom
   throw new Error(`Unsupported spreadsheet output: .${outputFormat}`)
 }
 
+// Parse quoted CSV properly (handles commas and quotes inside cells)
+function parseCSVLine(line: string): string[] {
+  const cells: string[] = []
+  let field = '', inQuotes = false, i = 0
+  while (i < line.length) {
+    const ch = line[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { field += '"'; i += 2; continue }
+        inQuotes = false; i++; continue
+      }
+      field += ch; i++; continue
+    }
+    if (ch === '"') { inQuotes = true; i++; continue }
+    if (ch === ',') { cells.push(field); field = ''; i++; continue }
+    field += ch; i++
+  }
+  cells.push(field)
+  return cells
+}
+
 function sheetToBlob(
   XLSX: typeof import('xlsx'),
   sheet: import('xlsx').WorkSheet,
@@ -67,13 +96,9 @@ function sheetToBlob(
     return new Blob([XLSX.utils.sheet_to_csv(sheet, { FS: '\t' })], { type: 'text/tab-separated-values' })
 
   if (outputFormat === 'json')
-    return new Blob(
-      [JSON.stringify(XLSX.utils.sheet_to_json(sheet), null, 2)],
-      { type: 'application/json' },
-    )
+    return new Blob([JSON.stringify(XLSX.utils.sheet_to_json(sheet), null, 2)], { type: 'application/json' })
 
   if (outputFormat === 'html') {
-    // SheetJS html output is a full <table> — wrap in a styled document
     const tableHtml = XLSX.utils.sheet_to_html(sheet)
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -97,18 +122,18 @@ ${tableHtml}
   }
 
   if (outputFormat === 'txt') {
-    // Plain-text table using CSV with comma→tab alignment substitution
-    // Get as CSV first, then format as aligned columns
     const csv = XLSX.utils.sheet_to_csv(sheet)
-    const rows = csv.split('\n').map(line => line.split(','))
+    const rows = csv.split('\n').map(line => parseCSVLine(line))
     const colWidths: number[] = []
     for (const row of rows) {
-      row.forEach((cell, i) => {
-        colWidths[i] = Math.max(colWidths[i] ?? 0, cell.length)
-      })
+      row.forEach((cell, i) => { colWidths[i] = Math.max(colWidths[i] ?? 0, cell.length) })
     }
+    // FIX (LOW): trim trailing whitespace from last column on each row
     const lines = rows.map(row =>
-      row.map((cell, i) => cell.padEnd(colWidths[i] ?? 0)).join('  ')
+      row.map((cell, i) => {
+        const isLast = i === row.length - 1
+        return isLast ? cell : cell.padEnd(colWidths[i] ?? 0)
+      }).join('  ').trimEnd()
     )
     return new Blob([lines.join('\n')], { type: 'text/plain' })
   }

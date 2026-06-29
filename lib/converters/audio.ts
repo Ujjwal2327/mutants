@@ -36,8 +36,6 @@ export async function convertAudio(
   outputFormat: string,
   onProgress?: (info: ConversionProgressInfo) => void,
 ): Promise<Blob> {
-  // Signal the loading phase before entering the queue so the UI updates
-  // immediately rather than waiting for queued jobs to finish first.
   if (!isFFmpegReady()) onProgress?.({ phase: 'loading' })
 
   return enqueueFFmpegJob(async () => {
@@ -56,7 +54,11 @@ export async function convertAudio(
 
     try {
       await ff.writeFile(inName, new Uint8Array(await file.arrayBuffer()))
-      await ff.exec(['-i', inName, ...buildAudioArgs(outputFormat), outName])
+      // BUG 11 FIX: add '-y' so ffmpeg unconditionally overwrites the output
+      // file.  Without it, if a previous (failed) conversion left a stale file
+      // with the same name in the virtual FS, ffmpeg would stall waiting for
+      // interactive confirmation.
+      await ff.exec(['-y', '-i', inName, ...buildAudioArgs(outputFormat), outName])
       const data = await ff.readFile(outName)
       return new Blob([new Uint8Array(data as Uint8Array)], { type: AUDIO_MIME[outputFormat] ?? 'audio/mpeg' })
     } finally {

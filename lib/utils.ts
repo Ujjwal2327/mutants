@@ -12,11 +12,6 @@ export function downloadBlob(blob: Blob, filename: string): void {
   const a = document.createElement('a')
   a.href = url
   a.download = filename
-  // The anchor must be briefly in the DOM for Firefox to honour the
-  // `download` attribute; revoking the URL synchronously after click()
-  // can race with the browser queuing the download in some browsers, so
-  // we defer revocation by 1 s — long enough for any browser to start
-  // the transfer, short enough that it doesn't linger.
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
@@ -59,15 +54,37 @@ export function dataURLToBlob(dataURL: string): Blob {
   return new Blob([bytes], { type: mime })
 }
 
+// BUG 9 FIX: when two converted files share the same output filename (e.g. the
+// user converts two different copies of "photo.jpg" to PNG), the old code used
+// the filename as an object key and the second entry silently overwrote the
+// first in the ZIP.  Now we detect duplicates and append " (1)", " (2)", … to
+// each colliding name so every file is preserved.
 export async function downloadAllAsZip(
   files: Array<{ blob: Blob; filename: string }>
 ): Promise<void> {
   const zipInput: fflate.Zippable = {}
+  const seen = new Map<string, number>()
+
   await Promise.all(
     files.map(async ({ blob, filename }) => {
-      zipInput[filename] = new Uint8Array(await blob.arrayBuffer())
+      // Build a unique key for this entry
+      let key = filename
+      if (seen.has(filename)) {
+        const count = seen.get(filename)! + 1
+        seen.set(filename, count)
+        const dot = filename.lastIndexOf('.')
+        if (dot >= 0) {
+          key = `${filename.substring(0, dot)} (${count})${filename.substring(dot)}`
+        } else {
+          key = `${filename} (${count})`
+        }
+      } else {
+        seen.set(filename, 0)
+      }
+      zipInput[key] = new Uint8Array(await blob.arrayBuffer())
     })
   )
+
   const zipped = fflate.zipSync(zipInput, { level: 6 })
   downloadBlob(new Blob([zipped], { type: 'application/zip' }), 'converted-files.zip')
 }
@@ -75,7 +92,8 @@ export async function downloadAllAsZip(
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
 
 export function uid(): string {

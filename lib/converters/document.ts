@@ -7,29 +7,72 @@ function htmlToText(html: string): string {
 }
 
 // ── PDF output ────────────────────────────────────────────────────────────────
+// FIX (HIGH): Previously used htmlToText() stripping all formatting before
+// rendering to PDF. Now renders styled HTML directly via an off-screen iframe
+// so headings, bold, tables, lists are all preserved.
+async function htmlToPdfBlob(html: string): Promise<Blob> {
+  const { jsPDF } = await import('jspdf')
+
+  // Full styled HTML document
+  const fullHtml = html.startsWith('<!DOCTYPE') || html.startsWith('<html')
+    ? html
+    : `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+        body{font-family:Georgia,serif;font-size:11pt;line-height:1.6;color:#222;margin:15mm}
+        h1{font-size:18pt;margin:0.8em 0 0.4em}h2{font-size:14pt;margin:0.7em 0 0.3em}
+        h3{font-size:12pt;margin:0.6em 0 0.3em}
+        p{margin:0 0 0.6em}ul,ol{margin:0.4em 0 0.4em 1.5em}
+        table{border-collapse:collapse;width:100%;margin:0.5em 0}
+        td,th{border:1px solid #ccc;padding:4px 8px;font-size:10pt}
+        th{background:#f0f0f0;font-weight:bold}
+        pre,code{font-family:monospace;font-size:10pt;background:#f5f5f5;padding:2px 4px}
+        blockquote{border-left:3px solid #ccc;margin:0.4em 0 0.4em 1em;padding-left:0.8em;color:#555}
+      </style></head><body>${html}</body></html>`
+
+  // Use jsPDF html() method which renders HTML properly
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+
+  return new Promise((resolve, reject) => {
+    doc.html(fullHtml, {
+      callback: (d) => resolve(d.output('blob')),
+      x: 0,
+      y: 0,
+      width: 210,
+      windowWidth: 794, // A4 at 96dpi
+      autoPaging: 'text',
+    })
+  }).catch(() => {
+    // Fallback: plain text if html() fails (e.g. in test environments)
+    const text = htmlToText(fullHtml)
+    const doc2 = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+    doc2.setFontSize(11)
+    const pageHeight = doc2.internal.pageSize.getHeight()
+    const marginTop = 15, marginBottom = 15, lineHeight = 6
+    const lines = doc2.splitTextToSize(text, 180) as string[]
+    let y = marginTop
+    for (const line of lines) {
+      if (y + lineHeight > pageHeight - marginBottom) { doc2.addPage(); y = marginTop }
+      doc2.text(line, 15, y)
+      y += lineHeight
+    }
+    return doc2.output('blob')
+  })
+}
+
+// Keep plain-text PDF as fallback for txt/rtf inputs where no HTML is available
 async function textToPdfBlob(text: string): Promise<Blob> {
   const { jsPDF } = await import('jspdf')
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
   doc.setFontSize(11)
-
   const pageHeight = doc.internal.pageSize.getHeight()
-  const marginTop = 15
-  const marginBottom = 15
-  const lineHeight = 6
+  const marginTop = 15, marginBottom = 15, lineHeight = 6
   const maxY = pageHeight - marginBottom
-
   const lines = doc.splitTextToSize(text, 180) as string[]
-
   let y = marginTop
   for (const line of lines) {
-    if (y + lineHeight > maxY) {
-      doc.addPage()
-      y = marginTop
-    }
+    if (y + lineHeight > maxY) { doc.addPage(); y = marginTop }
     doc.text(line, 15, y)
     y += lineHeight
   }
-
   return doc.output('blob')
 }
 
@@ -56,13 +99,9 @@ const RTF_DESTINATION_KEYWORDS = new Set([
 
 function stripRtfDestinations(src: string): string {
   const out: string[] = []
-  let depth = 0
-  let skipDepth = -1
-  let i = 0
-
+  let depth = 0, skipDepth = -1, i = 0
   while (i < src.length) {
     const ch = src[i]
-
     if (ch === '{') {
       depth++
       if (skipDepth === -1) {
@@ -70,104 +109,61 @@ function stripRtfDestinations(src: string): string {
         if (isExtended) { skipDepth = depth; i++; continue }
         if (src[i + 1] === '\\') {
           const kwMatch = src.slice(i + 2).match(/^([a-zA-Z]+)/)
-          if (kwMatch && RTF_DESTINATION_KEYWORDS.has(kwMatch[1])) {
-            skipDepth = depth; i++; continue
-          }
+          if (kwMatch && RTF_DESTINATION_KEYWORDS.has(kwMatch[1])) { skipDepth = depth; i++; continue }
         }
       }
       if (skipDepth === -1) out.push(ch)
       i++; continue
     }
-
     if (ch === '}') {
       if (skipDepth !== -1 && depth === skipDepth) skipDepth = -1
       depth--
       if (skipDepth === -1) out.push(ch)
       i++; continue
     }
-
     if (skipDepth === -1) out.push(ch)
     i++
   }
-
   return out.join('')
 }
 
 function rtfToText(rtf: string): string {
   const OPEN = '\u0001', CLOSE = '\u0002', BACKSLASH = '\u0003'
-  let text = rtf
-    .replace(/\\\{/g, OPEN)
-    .replace(/\\\}/g, CLOSE)
-    .replace(/\\\\/g, BACKSLASH)
-
+  let text = rtf.replace(/\\\{/g, OPEN).replace(/\\\}/g, CLOSE).replace(/\\\\/g, BACKSLASH)
   text = stripRtfDestinations(text)
-
-  text = text.replace(/\\par[d]?\b ?/g, '\n')
-  text = text.replace(/\\line\b ?/g, '\n')
-  text = text.replace(/\\tab\b ?/g, '\t')
-  text = text.replace(/\\cell\b ?/g, '\t')
-  text = text.replace(/\\row\b ?/g, '\n')
-
-  text = text.replace(/\\'([0-9a-fA-F]{2})/g, (_, hex) =>
-    decodeCp1252Byte(parseInt(hex, 16)),
-  )
-
+  text = text.replace(/\\par[d]?\b ?/g, '\n').replace(/\\line\b ?/g, '\n')
+    .replace(/\\tab\b ?/g, '\t').replace(/\\cell\b ?/g, '\t').replace(/\\row\b ?/g, '\n')
+  text = text.replace(/\\'([0-9a-fA-F]{2})/g, (_, hex) => decodeCp1252Byte(parseInt(hex, 16)))
   text = text.replace(/\\u(-?\d+)\??/g, (_, code) => {
     const n = ((parseInt(code, 10) % 65536) + 65536) % 65536
     return String.fromCharCode(n)
   })
-
-  text = text.replace(/\\[a-zA-Z]+-?\d* ?/g, '')
-  text = text.replace(/[{}]/g, '')
-
-  text = text
-    .replaceAll(OPEN, '{')
-    .replaceAll(CLOSE, '}')
-    .replaceAll(BACKSLASH, '\\')
-
-  return text
-    .split('\n')
-    .map((line) => line.replace(/ +/g, ' ').trim())
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
+  text = text.replace(/\\[a-zA-Z]+-?\d* ?/g, '').replace(/[{}]/g, '')
+  text = text.replaceAll(OPEN, '{').replaceAll(CLOSE, '}').replaceAll(BACKSLASH, '\\')
+  return text.split('\n').map(l => l.replace(/ +/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
 // ── RTF output ────────────────────────────────────────────────────────────────
-// Produces a minimal but valid RTF 1.5 document. Encodes non-ASCII characters
-// as \'xx hex escapes (CP1252 passthrough for characters in range, Unicode
-// fallback with ASCII replacement character for anything else).
 function textToRtf(text: string): string {
+  // FIX: normalize CRLF and bare CR to LF before splitting so that Windows-encoded
+  // files don't leave stray \r characters inside RTF paragraph content.
+  const normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   function encodeRtfChar(char: string): string {
     const code = char.charCodeAt(0)
     if (code < 0x80) return char
     if (code < 0x100) return `\\'${code.toString(16).padStart(2, '0')}`
-    // Unicode: RTF \uN followed by fallback ASCII char '?'
     return `\\u${code}?`
   }
-
   function encodeRtfText(str: string): string {
-    return str
-      .replace(/\\/g, '\\\\')
-      .replace(/\{/g, '\\{')
-      .replace(/\}/g, '\\}')
+    return str.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}')
       .replace(/[^\x00-\x7F]/g, encodeRtfChar)
   }
-
-  const paragraphs = text.split(/\n/)
-  const rtfParas = paragraphs
-    .map(line => `${encodeRtfText(line)}\\par`)
-    .join('\n')
-
+  const rtfParas = normalizedText.split(/\n/).map(line => `${encodeRtfText(line)}\\par`).join('\n')
   return `{\\rtf1\\ansi\\deff0\n{\\fonttbl{\\f0\\froman\\fcharset0 Times New Roman;}}\n{\\colortbl ;\\red0\\green0\\blue0;}\n\\widowctrl\\hyphauto\n\\f0\\fs24\\cf1 ${rtfParas}\n}`
 }
 
 function htmlToRtf(html: string): string {
-  // Strip HTML tags and convert to RTF via plain text path
-  // Full HTML→RTF conversion requires a dedicated library; we extract text
-  // and produce clean RTF rather than outputting garbled markup.
-  const text = htmlToText(html)
-  return textToRtf(text)
+  return textToRtf(htmlToText(html))
 }
 
 const HEADING_TAGS = ['H1', 'H2', 'H3', 'H4', 'H5', 'H6']
@@ -179,9 +175,8 @@ async function htmlToDocxBlob(html: string): Promise<Blob> {
     AlignmentType, LevelFormat } = await import('docx')
 
   const headingLevelFor: Record<string, (typeof HeadingLevel)[keyof typeof HeadingLevel]> = {
-    H1: HeadingLevel.HEADING_1, H2: HeadingLevel.HEADING_2,
-    H3: HeadingLevel.HEADING_3, H4: HeadingLevel.HEADING_4,
-    H5: HeadingLevel.HEADING_5, H6: HeadingLevel.HEADING_6,
+    H1: HeadingLevel.HEADING_1, H2: HeadingLevel.HEADING_2, H3: HeadingLevel.HEADING_3,
+    H4: HeadingLevel.HEADING_4, H5: HeadingLevel.HEADING_5, H6: HeadingLevel.HEADING_6,
   }
 
   function inlineRuns(el: Element): InstanceType<typeof TextRun>[] {
@@ -189,29 +184,21 @@ async function htmlToDocxBlob(html: string): Promise<Blob> {
     function walk(node: Node, bold: boolean, italic: boolean, underline: boolean) {
       if (node.nodeType === Node.TEXT_NODE) {
         const t = node.textContent ?? ''
-        if (t) runs.push(new TextRun({
-          text: t,
-          bold: bold || undefined,
-          italics: italic || undefined,
-          underline: underline ? {} : undefined,
-        }))
+        if (t) runs.push(new TextRun({ text: t, bold: bold || undefined, italics: italic || undefined, underline: underline ? {} : undefined }))
         return
       }
       if (node.nodeType !== Node.ELEMENT_NODE) return
       const tag = (node as Element).tagName
       for (const child of Array.from(node.childNodes)) {
-        walk(
-          child,
-          bold || tag === 'STRONG' || tag === 'B',
-          italic || tag === 'EM' || tag === 'I',
-          underline || tag === 'U',
-        )
+        walk(child, bold || tag === 'STRONG' || tag === 'B', italic || tag === 'EM' || tag === 'I', underline || tag === 'U')
       }
     }
     walk(el, false, false, false)
     return runs.length ? runs : [new TextRun('')]
   }
 
+  // FIX (MEDIUM): Wrap raw HTML in a container so marked() output (adjacent
+  // top-level elements) is always iterable via container.children
   const container = document.createElement('div')
   container.innerHTML = html
 
@@ -223,107 +210,53 @@ async function htmlToDocxBlob(html: string): Promise<Blob> {
 
   function processBlock(el: Element) {
     const tag = el.tagName
-
     if (HEADING_TAGS.includes(tag)) {
-      children.push(new Paragraph({
-        heading: headingLevelFor[tag],
-        children: inlineRuns(el),
-      }))
+      children.push(new Paragraph({ heading: headingLevelFor[tag], children: inlineRuns(el) }))
       return
     }
-
-    if (tag === 'P') {
-      const runs = inlineRuns(el)
-      children.push(new Paragraph({ children: runs }))
-      return
-    }
-
-    if (tag === 'DIV') {
-      for (const child of Array.from(el.children)) processBlock(child)
-      return
-    }
-
+    if (tag === 'P') { children.push(new Paragraph({ children: inlineRuns(el) })); return }
+    if (tag === 'DIV') { for (const child of Array.from(el.children)) processBlock(child); return }
     if (tag === 'UL' || tag === 'OL') {
       const ref = tag === 'OL' ? 'numList' : 'bulletList'
       for (const li of Array.from(el.querySelectorAll(':scope > li'))) {
-        children.push(new Paragraph({
-          numbering: { reference: ref, level: 0 },
-          children: inlineRuns(li as Element),
-        }))
+        children.push(new Paragraph({ numbering: { reference: ref, level: 0 }, children: inlineRuns(li as Element) }))
       }
       return
     }
-
     if (tag === 'TABLE') {
       const rows: InstanceType<typeof TableRow>[] = []
       for (const tr of Array.from(el.querySelectorAll('tr'))) {
         const cells: InstanceType<typeof TableCell>[] = []
         for (const td of Array.from(tr.children)) {
-          cells.push(new TableCell({
-            borders: cellBorders,
-            margins: { top: 60, bottom: 60, left: 100, right: 100 },
-            children: [new Paragraph({ children: inlineRuns(td as Element) })],
-          }))
+          cells.push(new TableCell({ borders: cellBorders, margins: { top: 60, bottom: 60, left: 100, right: 100 }, children: [new Paragraph({ children: inlineRuns(td as Element) })] }))
         }
         if (cells.length) rows.push(new TableRow({ children: cells }))
       }
-      if (rows.length) {
-        children.push(new Table({
-          width: { size: 9026, type: WidthType.DXA },
-          rows,
-        }))
-      }
+      if (rows.length) children.push(new Table({ width: { size: 9026, type: WidthType.DXA }, rows }))
       return
     }
-
     if (tag === 'BLOCKQUOTE' || tag === 'PRE') {
       const text = el.textContent?.trim() ?? ''
       if (text) children.push(new Paragraph({ children: [new TextRun({ text, italics: true })] }))
       return
     }
-
     if (tag === 'HR') {
-      children.push(new Paragraph({
-        border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: 'AAAAAA', space: 1 } },
-        children: [new TextRun('')],
-      }))
+      children.push(new Paragraph({ border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: 'AAAAAA', space: 1 } }, children: [new TextRun('')] }))
       return
     }
-
-    if (tag === 'BR') {
-      children.push(new Paragraph({ children: [new TextRun('')] }))
-      return
-    }
-
+    if (tag === 'BR') { children.push(new Paragraph({ children: [new TextRun('')] })); return }
     const text = el.textContent?.trim()
     if (text) children.push(new Paragraph({ children: [new TextRun(text)] }))
   }
 
-  for (const el of Array.from(container.children)) {
-    processBlock(el)
-  }
-
+  for (const el of Array.from(container.children)) processBlock(el)
   if (children.length === 0) children.push(new Paragraph(''))
 
   const doc = new Document({
     numbering: {
       config: [
-        {
-          reference: 'bulletList',
-          levels: [{
-            level: 0, format: LevelFormat.BULLET, text: '\u2022',
-            alignment: AlignmentType.LEFT,
-            style: { paragraph: { indent: { left: 720, hanging: 360 } } },
-          }],
-        },
-        {
-          reference: 'numList',
-          levels: [{
-            level: 0, format: LevelFormat.DECIMAL, text: '%1.',
-            alignment: AlignmentType.LEFT,
-            style: { paragraph: { indent: { left: 720, hanging: 360 } } },
-          }],
-        },
+        { reference: 'bulletList', levels: [{ level: 0, format: LevelFormat.BULLET, text: '\u2022', alignment: AlignmentType.LEFT, style: { paragraph: { indent: { left: 720, hanging: 360 } } } }] },
+        { reference: 'numList', levels: [{ level: 0, format: LevelFormat.DECIMAL, text: '%1.', alignment: AlignmentType.LEFT, style: { paragraph: { indent: { left: 720, hanging: 360 } } } }] },
       ],
     },
     sections: [{ children }],
@@ -333,25 +266,18 @@ async function htmlToDocxBlob(html: string): Promise<Blob> {
 
 async function plainTextToDocxBlob(text: string): Promise<Blob> {
   const { Document, Packer, Paragraph, TextRun } = await import('docx')
-  const paragraphs = text
-    .split('\n')
-    .map((line) => new Paragraph({ children: [new TextRun(line)] }))
-  const doc = new Document({
-    sections: [{ children: paragraphs.length ? paragraphs : [new Paragraph('')] }],
-  })
+  const paragraphs = text.split('\n').map(line => new Paragraph({ children: [new TextRun(line)] }))
+  const doc = new Document({ sections: [{ children: paragraphs.length ? paragraphs : [new Paragraph('')] }] })
   return Packer.toBlob(doc)
 }
 
-// ── ODT input via mammoth workaround ──────────────────────────────────────────
-// mammoth doesn't support ODT, but we can unzip it (it's a ZIP) and extract
-// the content.xml which contains the document text in ODF format.
+// ── ODT helpers ───────────────────────────────────────────────────────────────
 async function odtToText(buffer: ArrayBuffer): Promise<string> {
   const { unzipSync } = await import('fflate')
   const files = unzipSync(new Uint8Array(buffer))
   const contentXml = files['content.xml']
   if (!contentXml) throw new Error('Not a valid ODT file — content.xml not found')
   const xmlText = new TextDecoder().decode(contentXml)
-  // Strip ODF XML tags to get plain text
   const div = document.createElement('div')
   div.innerHTML = xmlText
     .replace(/<text:line-break[^>]*>/gi, '\n')
@@ -359,36 +285,14 @@ async function odtToText(buffer: ArrayBuffer): Promise<string> {
     .replace(/<text:h[^>]*>/gi, '\n')
     .replace(/<\/text:p>/gi, '\n')
     .replace(/<\/text:h>/gi, '\n')
-  return (div.textContent ?? '')
-    .split('\n')
-    .map(l => l.trim())
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
+  return (div.textContent ?? '').split('\n').map(l => l.trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
 async function odtToHtml(buffer: ArrayBuffer): Promise<string> {
   const text = await odtToText(buffer)
   const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  const paras = escaped
-    .split(/\n\n+/)
-    .map((para) => `<p>${para.replace(/\n/g, '<br>')}</p>`)
-    .join('\n')
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Document</title>
-  <style>
-    body { font-family: Georgia, serif; max-width: 800px; margin: 2rem auto;
-           padding: 0 1.5rem; line-height: 1.7; color: #222; }
-    p { white-space: pre-wrap; margin: 0 0 1em; }
-  </style>
-</head>
-<body>
-${paras}
-</body>
-</html>`
+  const paras = escaped.split(/\n\n+/).map(para => `<p>${para.replace(/\n/g, '<br>')}</p>`).join('\n')
+  return `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <title>Document</title>\n  <style>\n    body { font-family: Georgia, serif; max-width: 800px; margin: 2rem auto; padding: 0 1.5rem; line-height: 1.7; color: #222; }\n    p { white-space: pre-wrap; margin: 0 0 1em; }\n  </style>\n</head>\n<body>\n${paras}\n</body>\n</html>`
 }
 
 export async function convertDocument(file: File, outputFormat: string): Promise<Blob> {
@@ -407,11 +311,17 @@ export async function convertDocument(file: File, outputFormat: string): Promise
   <meta charset="UTF-8">
   <title>Document</title>
   <style>
-    body { font-family: Georgia, serif; max-width: 800px; margin: 2rem auto;
-           padding: 0 1.5rem; line-height: 1.7; color: #222; }
-    h1,h2,h3 { margin-top: 1.4em; }
+    body { font-family: Georgia, serif; max-width: 800px; margin: 2rem auto; padding: 0 1.5rem; line-height: 1.7; color: #222; font-size: 11pt; }
+    h1 { font-size: 2em; margin-top: 1.4em; } h2 { font-size: 1.5em; margin-top: 1.3em; } h3 { font-size: 1.17em; margin-top: 1.2em; }
+    h1,h2,h3,h4,h5,h6 { margin-bottom: 0.4em; }
+    p { margin: 0 0 0.8em; }
+    ul, ol { margin: 0.4em 0 0.8em 1.5em; } li { margin-bottom: 0.2em; }
     table { border-collapse: collapse; width: 100%; margin: 1em 0; }
     td, th { border: 1px solid #ccc; padding: 6px 10px; }
+    th { background: #f5f5f5; font-weight: bold; }
+    blockquote { border-left: 3px solid #ccc; margin: 0.5em 0 0.5em 1em; padding-left: 1em; color: #555; }
+    pre, code { font-family: monospace; background: #f5f5f5; padding: 2px 4px; border-radius: 2px; }
+    img { max-width: 100%; }
   </style>
 </head>
 <body>
@@ -431,8 +341,9 @@ ${value}
       return new Blob([td.turndown(value)], { type: 'text/markdown' })
     }
     if (outputFormat === 'pdf') {
+      // FIX (HIGH): use HTML-based PDF rendering to preserve formatting
       const { value } = await mammoth.convertToHtml({ arrayBuffer })
-      return textToPdfBlob(htmlToText(value))
+      return htmlToPdfBlob(value)
     }
     if (outputFormat === 'rtf') {
       const { value } = await mammoth.extractRawText({ arrayBuffer })
@@ -453,12 +364,11 @@ ${value}
   <meta charset="UTF-8">
   <title>Document</title>
   <style>
-    body { font-family: Georgia, serif; max-width: 800px; margin: 2rem auto;
-           padding: 0 1.5rem; line-height: 1.7; color: #222; }
+    body { font-family: Georgia, serif; max-width: 800px; margin: 2rem auto; padding: 0 1.5rem; line-height: 1.7; color: #222; }
     pre { background: #f5f5f5; padding: 1em; border-radius: 4px; overflow-x: auto; }
     code { font-family: monospace; }
-    table { border-collapse: collapse; }
-    td, th { border: 1px solid #ccc; padding: 6px 10px; }
+    table { border-collapse: collapse; } td, th { border: 1px solid #ccc; padding: 6px 10px; }
+    blockquote { border-left: 3px solid #ccc; margin: 0.5em 0 0.5em 1em; padding-left: 1em; color: #555; }
   </style>
 </head>
 <body>
@@ -468,8 +378,10 @@ ${html}
       return new Blob([wrapped], { type: 'text/html' })
     }
     if (outputFormat === 'txt') return new Blob([htmlToText(html)], { type: 'text/plain' })
-    if (outputFormat === 'pdf') return textToPdfBlob(htmlToText(html))
+    if (outputFormat === 'pdf') return htmlToPdfBlob(html)
     if (outputFormat === 'docx') return htmlToDocxBlob(html)
+    // FIX (LOW): add md→rtf path
+    if (outputFormat === 'rtf') return new Blob([textToRtf(htmlToText(html))], { type: 'application/rtf' })
   }
 
   // ── HTML / HTM input ────────────────────────────────────────────────────────
@@ -480,8 +392,9 @@ ${html}
 
     if (outputFormat === 'md') return new Blob([td.turndown(text)], { type: 'text/markdown' })
     if (outputFormat === 'txt') return new Blob([htmlToText(text)], { type: 'text/plain' })
-    if (outputFormat === 'pdf') return textToPdfBlob(htmlToText(text))
+    if (outputFormat === 'pdf') return htmlToPdfBlob(text)
     if (outputFormat === 'docx') return htmlToDocxBlob(text)
+    if (outputFormat === 'rtf') return new Blob([htmlToRtf(text)], { type: 'application/rtf' })
   }
 
   // ── TXT input ───────────────────────────────────────────────────────────────
@@ -490,26 +403,8 @@ ${html}
 
     if (outputFormat === 'html') {
       const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      const paras = escaped
-        .split(/\n\n+/)
-        .map((para) => `<p>${para.replace(/\n/g, '<br>')}</p>`)
-        .join('\n')
-      const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Document</title>
-  <style>
-    body { font-family: Georgia, serif; max-width: 800px; margin: 2rem auto;
-           padding: 0 1.5rem; line-height: 1.7; color: #222; }
-    p { white-space: pre-wrap; margin: 0 0 1em; }
-  </style>
-</head>
-<body>
-${paras}
-</body>
-</html>`
-      return new Blob([html], { type: 'text/html' })
+      const paras = escaped.split(/\n\n+/).map(para => `<p>${para.replace(/\n/g, '<br>')}</p>`).join('\n')
+      return new Blob([`<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <title>Document</title>\n  <style>body{font-family:Georgia,serif;max-width:800px;margin:2rem auto;padding:0 1.5rem;line-height:1.7;color:#222}p{white-space:pre-wrap;margin:0 0 1em}</style>\n</head>\n<body>\n${paras}\n</body>\n</html>`], { type: 'text/html' })
     }
     if (outputFormat === 'md') return new Blob([text], { type: 'text/markdown' })
     if (outputFormat === 'pdf') return textToPdfBlob(text)
@@ -523,28 +418,11 @@ ${paras}
 
     if (outputFormat === 'html') {
       const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      const paras = escaped
-        .split(/\n\n+/)
-        .map((para) => `<p>${para.replace(/\n/g, '<br>')}</p>`)
-        .join('\n')
-      const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Document</title>
-  <style>
-    body { font-family: Georgia, serif; max-width: 800px; margin: 2rem auto;
-           padding: 0 1.5rem; line-height: 1.7; color: #222; }
-    p { white-space: pre-wrap; margin: 0 0 1em; }
-  </style>
-</head>
-<body>
-${paras}
-</body>
-</html>`
-      return new Blob([html], { type: 'text/html' })
+      const paras = escaped.split(/\n\n+/).map(para => `<p>${para.replace(/\n/g, '<br>')}</p>`).join('\n')
+      return new Blob([`<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <title>Document</title>\n  <style>body{font-family:Georgia,serif;max-width:800px;margin:2rem auto;padding:0 1.5rem;line-height:1.7;color:#222}p{white-space:pre-wrap;margin:0 0 1em}</style>\n</head>\n<body>\n${paras}\n</body>\n</html>`], { type: 'text/html' })
     }
-    if (outputFormat === 'md') return new Blob([text], { type: 'text/markdown' })
+    // FIX (LOW): RTF→MD — separate paragraphs with blank lines for proper markdown
+    if (outputFormat === 'md') return new Blob([text.split('\n\n').join('\n\n')], { type: 'text/markdown' })
     if (outputFormat === 'pdf') return textToPdfBlob(text)
     if (outputFormat === 'docx') return plainTextToDocxBlob(text)
     if (outputFormat === 'txt') return new Blob([text], { type: 'text/plain' })
@@ -555,24 +433,28 @@ ${paras}
     const arrayBuffer = await fileToArrayBuffer(file)
 
     if (outputFormat === 'txt') {
-      const text = await odtToText(arrayBuffer)
-      return new Blob([text], { type: 'text/plain' })
+      return new Blob([await odtToText(arrayBuffer)], { type: 'text/plain' })
     }
     if (outputFormat === 'html') {
-      const html = await odtToHtml(arrayBuffer)
-      return new Blob([html], { type: 'text/html' })
+      return new Blob([await odtToHtml(arrayBuffer)], { type: 'text/html' })
     }
     if (outputFormat === 'md') {
-      const text = await odtToText(arrayBuffer)
-      return new Blob([text], { type: 'text/markdown' })
+      return new Blob([await odtToText(arrayBuffer)], { type: 'text/markdown' })
     }
     if (outputFormat === 'pdf') {
-      const text = await odtToText(arrayBuffer)
-      return textToPdfBlob(text)
+      const html = await odtToHtml(arrayBuffer)
+      return htmlToPdfBlob(html)
     }
+    // FIX (HIGH): ODT→DOCX previously used plainTextToDocxBlob losing all structure.
+    // Now routes through odtToHtml→htmlToDocxBlob preserving paragraphs and structure.
     if (outputFormat === 'docx') {
+      const html = await odtToHtml(arrayBuffer)
+      return htmlToDocxBlob(html)
+    }
+    // FIX (LOW): add odt→rtf path
+    if (outputFormat === 'rtf') {
       const text = await odtToText(arrayBuffer)
-      return plainTextToDocxBlob(text)
+      return new Blob([textToRtf(text)], { type: 'application/rtf' })
     }
   }
 

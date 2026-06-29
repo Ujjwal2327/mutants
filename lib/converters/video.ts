@@ -34,7 +34,6 @@ function buildVideoArgs(outputFormat: string): string[] {
     case 'avi':
       return ['-codec:v', 'mpeg4', '-qscale:v', '5', '-codec:a', 'libmp3lame']
     case 'mkv':
-      // MKV can hold H.264+AAC — fast, compatible
       return [
         '-codec:v', 'libx264', '-crf', '23', '-preset', 'fast',
         '-codec:a', 'aac', '-b:a', '128k',
@@ -55,7 +54,6 @@ function buildVideoArgs(outputFormat: string): string[] {
         '-codec:a', 'aac', '-b:a', '128k',
       ]
     case 'wmv':
-      // WMV2 + WMA2 — standard Windows Media format
       return [
         '-codec:v', 'wmv2', '-qscale:v', '5',
         '-codec:a', 'wmav2', '-b:a', '128k',
@@ -74,14 +72,12 @@ function buildVideoArgs(outputFormat: string): string[] {
     case 'mpg':
       return ['-codec:v', 'mpeg2video', '-qscale:v', '5', '-codec:a', 'mp2', '-b:a', '192k']
     case 'ts':
-      // MPEG-2 Transport Stream — H.264+AAC
       return [
         '-codec:v', 'libx264', '-crf', '23', '-preset', 'fast',
         '-codec:a', 'aac', '-b:a', '128k',
         '-f', 'mpegts',
       ]
     case 'm4v':
-      // M4V is essentially MP4 with Apple DRM placeholder — H.264+AAC
       return [
         '-codec:v', 'libx264', '-crf', '23', '-preset', 'fast',
         '-codec:a', 'aac', '-b:a', '128k',
@@ -116,13 +112,16 @@ export async function convertVideo(
     try {
       await ff.writeFile(inName, new Uint8Array(await file.arrayBuffer()))
 
-      // ── Fast path: stream copy for MP4/MKV/MOV (container remux) ──────────
-      // If the source already has H.264+AAC, a container remux is instant.
-      // We only try this for output formats that accept H.264+AAC natively.
+      // ── Fast path: stream copy for container remux ─────────────────────────
+      // BUG 11 FIX: added '-y' to both exec calls so ffmpeg overwrites the
+      // output file without prompting.  Without it, if the fast-path produces a
+      // too-small file and we fall through to the slow re-encode path, ffmpeg
+      // finds the output file already exists and may stall or error instead of
+      // overwriting it.
       if (['mp4', 'mkv', 'mov', 'm4v'].includes(outputFormat)) {
         const copyArgs = outputFormat === 'mp4'
-          ? ['-c', 'copy', '-movflags', '+faststart']
-          : ['-c', 'copy']
+          ? ['-y', '-c', 'copy', '-movflags', '+faststart']
+          : ['-y', '-c', 'copy']
         await ff.exec(['-i', inName, ...copyArgs, outName])
         const copied = (await ff.readFile(outName).catch(() => null)) as Uint8Array | null
         if (copied && copied.length > 10_000) {
@@ -131,8 +130,9 @@ export async function convertVideo(
         await ff.deleteFile(outName).catch(() => { })
       }
 
-      // ── Slow path: full re-encode ─────────────────────────────────────────
-      await ff.exec(['-i', inName, ...buildVideoArgs(outputFormat), outName])
+      // ── Slow path: full re-encode ──────────────────────────────────────────
+      // BUG 11 FIX: '-y' ensures ffmpeg overwrites without interactive prompt
+      await ff.exec(['-y', '-i', inName, ...buildVideoArgs(outputFormat), outName])
       const data = await ff.readFile(outName)
       return new Blob([new Uint8Array(data as Uint8Array)], { type: OUTPUT_MIME[outputFormat] ?? 'video/mp4' })
     } finally {
