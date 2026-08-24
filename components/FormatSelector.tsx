@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useId } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, Check, Search } from "lucide-react";
 import { FORMAT_GROUPS } from "@/lib/formatRegistry";
 import { cn } from "@/lib/utils";
@@ -25,12 +26,13 @@ function buildGroups(targets: string[], query: string) {
   })).filter((g) => g.options.length > 0);
 }
 
-// Portal rendered to document.body to escape any overflow:hidden ancestor
+// Portal rendered to document.body to escape any overflow:hidden ancestor.
+// mounted starts false so this renders null during SSR (document.body
+// doesn't exist server-side) and flips true once mounted on the client.
 function Portal({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   if (!mounted) return null;
-  const { createPortal } = require("react-dom");
   return createPortal(children, document.body);
 }
 

@@ -35,10 +35,24 @@ export async function convertAudio(
   file: File,
   outputFormat: string,
   onProgress?: (info: ConversionProgressInfo) => void,
+  signal?: AbortSignal,
 ): Promise<Blob> {
-  if (!isFFmpegReady()) onProgress?.({ phase: 'loading' })
+  signal?.throwIfAborted()
 
   return enqueueFFmpegJob(async () => {
+    // Re-check after waiting in the (single-threaded) ffmpeg job queue -
+    // cancelling while queued behind another conversion should skip the
+    // work entirely rather than running it anyway once its turn comes up.
+    signal?.throwIfAborted()
+
+    // Checked here (after dequeuing), not before enqueueing: multiple
+    // files started together (e.g. "Convert all") would otherwise ALL
+    // report phase:'loading' immediately, even though only the one that's
+    // actually about to run triggers a real engine load — the rest are
+    // just waiting in line and show a misleading "loading" status for
+    // however long they sit in the queue.
+    if (!isFFmpegReady()) onProgress?.({ phase: 'loading' })
+
     const ff = await getFFmpeg()
 
     const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
@@ -58,7 +72,14 @@ export async function convertAudio(
       // file.  Without it, if a previous (failed) conversion left a stale file
       // with the same name in the virtual FS, ffmpeg would stall waiting for
       // interactive confirmation.
-      await ff.exec(['-y', '-i', inName, ...buildAudioArgs(outputFormat), outName])
+      // Passing `signal` here lets ffmpeg.wasm actually abort a running
+      // encode mid-flight (it's a documented option on exec()), rather than
+      // the app only being able to discard the result after ffmpeg finishes
+      // on its own regardless of a cancel click.
+      const exitCode = await ff.exec(['-y', '-i', inName, ...buildAudioArgs(outputFormat), outName], -1, { signal })
+      if (exitCode !== 0) {
+        throw new Error(`ffmpeg failed to convert to .${outputFormat} (exit code ${exitCode})`)
+      }
       const data = await ff.readFile(outName)
       return new Blob([new Uint8Array(data as Uint8Array)], { type: AUDIO_MIME[outputFormat] ?? 'audio/mpeg' })
     } finally {

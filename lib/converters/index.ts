@@ -15,47 +15,47 @@ export const convert: ConverterFn = async (file, outputFormat, onProgress, signa
     case 'image': {
       const { convertImage } = await import('./image')
       signal?.throwIfAborted()
-      return convertImage(file, outputFormat)
+      return convertImage(file, outputFormat, signal)
     }
     case 'pdf': {
       const { convertPdf } = await import('./pdf')
       signal?.throwIfAborted()
-      return convertPdf(file, outputFormat)
+      return convertPdf(file, outputFormat, signal)
     }
     case 'spreadsheet': {
       const { convertSpreadsheet } = await import('./spreadsheet')
       signal?.throwIfAborted()
-      return convertSpreadsheet(file, outputFormat)
+      return convertSpreadsheet(file, outputFormat, signal)
     }
     case 'document': {
       const { convertDocument } = await import('./document')
       signal?.throwIfAborted()
-      return convertDocument(file, outputFormat)
+      return convertDocument(file, outputFormat, signal)
     }
     case 'data': {
       const { convertData } = await import('./data')
       signal?.throwIfAborted()
-      return convertData(file, outputFormat)
+      return convertData(file, outputFormat, signal)
     }
     case 'archive': {
       const { convertArchive } = await import('./archive')
       signal?.throwIfAborted()
-      return convertArchive(file, outputFormat)
+      return convertArchive(file, outputFormat, signal)
     }
     case 'font': {
       const { convertFont } = await import('./font')
       signal?.throwIfAborted()
-      return convertFont(file, outputFormat)
+      return convertFont(file, outputFormat, signal)
     }
     case 'audio': {
       const { convertAudio } = await import('./audio')
       signal?.throwIfAborted()
-      return convertAudio(file, outputFormat, onProgress)
+      return convertAudio(file, outputFormat, onProgress, signal)
     }
     case 'video': {
       const { convertVideo } = await import('./video')
       signal?.throwIfAborted()
-      return convertVideo(file, outputFormat, onProgress)
+      return convertVideo(file, outputFormat, onProgress, signal)
     }
     default:
       throw new Error(`Unknown converter module: ${info.converterModule}`)

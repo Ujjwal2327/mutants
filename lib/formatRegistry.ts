@@ -68,30 +68,31 @@ export const FORMAT_REGISTRY: Record<string, FormatInfo> = {
   woff2: { group: 'Font', mimeType: 'font/woff2', targets: ['ttf', 'otf', 'woff'], converterModule: 'font' },
 
   // ── Audio ───────────────────────────────────────────────────────────────────
-  mp3: { group: 'Audio', mimeType: 'audio/mpeg', targets: ['wav', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'aiff', 'wma'], converterModule: 'audio' },
-  wav: { group: 'Audio', mimeType: 'audio/wav', targets: ['mp3', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'aiff', 'wma'], converterModule: 'audio' },
-  ogg: { group: 'Audio', mimeType: 'audio/ogg', targets: ['mp3', 'wav', 'flac', 'aac', 'm4a', 'opus', 'aiff'], converterModule: 'audio' },
-  flac: { group: 'Audio', mimeType: 'audio/flac', targets: ['mp3', 'wav', 'ogg', 'aac', 'm4a', 'opus', 'aiff'], converterModule: 'audio' },
-  aac: { group: 'Audio', mimeType: 'audio/aac', targets: ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'opus', 'aiff'], converterModule: 'audio' },
-  m4a: { group: 'Audio', mimeType: 'audio/mp4', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'opus', 'aiff'], converterModule: 'audio' },
-  opus: { group: 'Audio', mimeType: 'audio/opus', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'aiff'], converterModule: 'audio' },
-  wma: { group: 'Audio', mimeType: 'audio/x-ms-wma', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'aiff'], converterModule: 'audio' },
-  aiff: { group: 'Audio', mimeType: 'audio/aiff', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'opus'], converterModule: 'audio' },
-  caf: { group: 'Audio', mimeType: 'audio/x-caf', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'opus'], converterModule: 'audio' },
-  ra: { group: 'Audio', mimeType: 'audio/vnd.rn-realaudio', targets: ['mp3', 'wav', 'ogg', 'aac', 'm4a'], converterModule: 'audio' },
+  mp3: { group: 'Audio', mimeType: 'audio/mpeg', targets: ['wav', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'aiff', 'wma', 'caf'], converterModule: 'audio' },
+  wav: { group: 'Audio', mimeType: 'audio/wav', targets: ['mp3', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'aiff', 'wma', 'caf'], converterModule: 'audio' },
+  ogg: { group: 'Audio', mimeType: 'audio/ogg', targets: ['mp3', 'wav', 'flac', 'aac', 'm4a', 'opus', 'aiff', 'wma', 'caf'], converterModule: 'audio' },
+  flac: { group: 'Audio', mimeType: 'audio/flac', targets: ['mp3', 'wav', 'ogg', 'aac', 'm4a', 'opus', 'aiff', 'wma', 'caf'], converterModule: 'audio' },
+  aac: { group: 'Audio', mimeType: 'audio/aac', targets: ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'opus', 'aiff', 'wma', 'caf'], converterModule: 'audio' },
+  m4a: { group: 'Audio', mimeType: 'audio/mp4', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'opus', 'aiff', 'wma', 'caf'], converterModule: 'audio' },
+  opus: { group: 'Audio', mimeType: 'audio/opus', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'aiff', 'wma', 'caf'], converterModule: 'audio' },
+  wma: { group: 'Audio', mimeType: 'audio/x-ms-wma', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'aiff', 'caf'], converterModule: 'audio' },
+  aiff: { group: 'Audio', mimeType: 'audio/aiff', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'wma', 'caf'], converterModule: 'audio' },
+  caf: { group: 'Audio', mimeType: 'audio/x-caf', targets: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'wma', 'aiff'], converterModule: 'audio' },
+  ra: { group: 'Audio', mimeType: 'audio/vnd.rn-realaudio', targets: ['mp3', 'wav', 'ogg', 'aac', 'm4a', 'flac', 'opus', 'wma', 'aiff', 'caf'], converterModule: 'audio' },
 
   // ── Video ───────────────────────────────────────────────────────────────────
-  mp4: { group: 'Video', mimeType: 'video/mp4', targets: ['webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'wmv'], converterModule: 'video' },
-  webm: { group: 'Video', mimeType: 'video/webm', targets: ['mp4', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v'], converterModule: 'video' },
-  mkv: { group: 'Video', mimeType: 'video/x-matroska', targets: ['mp4', 'webm', 'avi', 'mov', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v'], converterModule: 'video' },
-  avi: { group: 'Video', mimeType: 'video/x-msvideo', targets: ['mp4', 'webm', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v'], converterModule: 'video' },
-  mov: { group: 'Video', mimeType: 'video/quicktime', targets: ['mp4', 'webm', 'avi', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v'], converterModule: 'video' },
-  flv: { group: 'Video', mimeType: 'video/x-flv', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', '3gp'], converterModule: 'video' },
-  '3gp': { group: 'Video', mimeType: 'video/3gpp', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv'], converterModule: 'video' },
-  wmv: { group: 'Video', mimeType: 'video/x-ms-wmv', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp'], converterModule: 'video' },
-  ts: { group: 'Video', mimeType: 'video/mp2t', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp'], converterModule: 'video' },
-  m4v: { group: 'Video', mimeType: 'video/x-m4v', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp'], converterModule: 'video' },
-  ogv: { group: 'Video', mimeType: 'video/ogg', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav'], converterModule: 'video' },
+  mp4: { group: 'Video', mimeType: 'video/mp4', targets: ['webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'wmv', 'mpg'], converterModule: 'video' },
+  webm: { group: 'Video', mimeType: 'video/webm', targets: ['mp4', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'wmv', 'mpg'], converterModule: 'video' },
+  mkv: { group: 'Video', mimeType: 'video/x-matroska', targets: ['mp4', 'webm', 'avi', 'mov', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'wmv', 'mpg'], converterModule: 'video' },
+  avi: { group: 'Video', mimeType: 'video/x-msvideo', targets: ['mp4', 'webm', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'wmv', 'mpg'], converterModule: 'video' },
+  mov: { group: 'Video', mimeType: 'video/quicktime', targets: ['mp4', 'webm', 'avi', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'wmv', 'mpg'], converterModule: 'video' },
+  flv: { group: 'Video', mimeType: 'video/x-flv', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', '3gp', 'ts', 'm4v', 'wmv', 'mpg'], converterModule: 'video' },
+  '3gp': { group: 'Video', mimeType: 'video/3gpp', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', 'ts', 'm4v', 'wmv', 'mpg'], converterModule: 'video' },
+  wmv: { group: 'Video', mimeType: 'video/x-ms-wmv', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'mpg'], converterModule: 'video' },
+  ts: { group: 'Video', mimeType: 'video/mp2t', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'm4v', 'wmv', 'mpg'], converterModule: 'video' },
+  m4v: { group: 'Video', mimeType: 'video/x-m4v', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'wmv', 'mpg'], converterModule: 'video' },
+  mpg: { group: 'Video', mimeType: 'video/mpeg', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'wmv'], converterModule: 'video' },
+  ogv: { group: 'Video', mimeType: 'video/ogg', targets: ['mp4', 'webm', 'avi', 'mov', 'mkv', 'gif', 'mp3', 'wav', 'flv', '3gp', 'ts', 'm4v', 'wmv', 'mpg'], converterModule: 'video' },
 }
 
 export const FORMAT_GROUPS: FormatGroup[] = [
@@ -105,7 +106,7 @@ export const FORMAT_GROUPS: FormatGroup[] = [
   { label: 'Archive', formats: ['zip', 'gz', 'gzip', 'tar', 'tgz'] },
   { label: 'Font', formats: ['ttf', 'otf', 'woff', 'woff2'] },
   { label: 'Audio', formats: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'opus', 'wma', 'aiff', 'caf', 'ra'] },
-  { label: 'Video', formats: ['mp4', 'webm', 'mkv', 'avi', 'mov', 'flv', '3gp', 'wmv', 'ts', 'm4v', 'ogv'] },
+  { label: 'Video', formats: ['mp4', 'webm', 'mkv', 'avi', 'mov', 'flv', '3gp', 'wmv', 'ts', 'm4v', 'mpg', 'ogv'] },
 ]
 
 export function getExtension(file: File): string {

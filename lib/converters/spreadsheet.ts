@@ -1,6 +1,7 @@
 import { fileToArrayBuffer, fileToText } from '@/lib/utils'
 
-export async function convertSpreadsheet(file: File, outputFormat: string): Promise<Blob> {
+export async function convertSpreadsheet(file: File, outputFormat: string, signal?: AbortSignal): Promise<Blob> {
+  signal?.throwIfAborted()
   const XLSX = await import('xlsx')
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
   let wb: ReturnType<typeof XLSX.read>
@@ -48,9 +49,21 @@ export async function convertSpreadsheet(file: File, outputFormat: string): Prom
     // Multiple sheets — ZIP them
     const { zipSync } = await import('fflate')
     const zipInput: Record<string, Uint8Array> = {}
+    // Two different sheet names can sanitize to the same filename (e.g.
+    // "Q1/Sales" and "Q1:Sales" both become "Q1_Sales"), which would
+    // otherwise silently overwrite one sheet's entry in the ZIP object.
+    const seenNames = new Map<string, number>()
 
     for (const name of sheetNames) {
-      const safeName = name.replace(/[/\\:*?"<>|]/g, '_')
+      signal?.throwIfAborted()
+      let safeName = name.replace(/[/\\:*?"<>|]/g, '_')
+      if (seenNames.has(safeName)) {
+        const count = seenNames.get(safeName)! + 1
+        seenNames.set(safeName, count)
+        safeName = `${safeName} (${count})`
+      } else {
+        seenNames.set(safeName, 0)
+      }
       const blob = sheetToBlob(XLSX, wb.Sheets[name], outputFormat, name)
       zipInput[`${safeName}.${outputFormat}`] = new Uint8Array(await blob.arrayBuffer())
     }
@@ -122,7 +135,10 @@ ${tableHtml}
   }
 
   if (outputFormat === 'txt') {
-    const csv = XLSX.utils.sheet_to_csv(sheet)
+    // sheet_to_csv can end with a trailing newline; without stripping it,
+    // splitting on '\n' below produces a spurious blank final "row" (a
+    // single empty cell) at the bottom of the aligned text table.
+    const csv = XLSX.utils.sheet_to_csv(sheet).replace(/\n+$/, '')
     const rows = csv.split('\n').map(line => parseCSVLine(line))
     const colWidths: number[] = []
     for (const row of rows) {

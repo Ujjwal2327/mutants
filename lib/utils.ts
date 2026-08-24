@@ -30,7 +30,22 @@ export function fileToArrayBuffer(file: File): Promise<ArrayBuffer> {
 export function fileToText(file: File, encoding = 'utf-8'): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = () => resolve(reader.result as string)
+    reader.onload = () => {
+      let text = reader.result as string
+      // Strip a leading UTF-8/UTF-16 BOM. FileReader.readAsText does not
+      // reliably strip this across all browsers/encodings, and a stray
+      // U+FEFF at position 0 shows up as an invisible-but-real character —
+      // e.g. corrupting the first JSON/YAML/XML token, or landing as a
+      // visible glyph at the very start of a converted document.
+      if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1)
+      // Normalize CRLF/CR to LF once, centrally. Several converters split
+      // input on '\n' or embed it verbatim in output (plain-text DOCX/PDF
+      // paragraphs, RTF); without this, Windows-authored (CRLF) files leave
+      // a stray '\r' on every line, which some viewers render as a visible
+      // control-character glyph and others silently misplace.
+      text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+      resolve(text)
+    }
     reader.onerror = () => reject(reader.error)
     reader.readAsText(file, encoding)
   })

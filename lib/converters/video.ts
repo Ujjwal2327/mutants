@@ -92,10 +92,20 @@ export async function convertVideo(
   file: File,
   outputFormat: string,
   onProgress?: (info: ConversionProgressInfo) => void,
+  signal?: AbortSignal,
 ): Promise<Blob> {
-  if (!isFFmpegReady()) onProgress?.({ phase: 'loading' })
+  signal?.throwIfAborted()
 
   return enqueueFFmpegJob(async () => {
+    // Re-check after waiting in the (single-threaded) ffmpeg job queue -
+    // cancelling while queued behind another conversion should skip the
+    // work entirely rather than running it anyway once its turn comes up.
+    signal?.throwIfAborted()
+
+    // Checked here (after dequeuing), not before enqueueing — see the
+    // matching comment in audio.ts's convertAudio for why.
+    if (!isFFmpegReady()) onProgress?.({ phase: 'loading' })
+
     const ff = await getFFmpeg()
 
     const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
@@ -122,9 +132,21 @@ export async function convertVideo(
         const copyArgs = outputFormat === 'mp4'
           ? ['-y', '-c', 'copy', '-movflags', '+faststart']
           : ['-y', '-c', 'copy']
-        await ff.exec(['-i', inName, ...copyArgs, outName])
+        // exec() resolves with ffmpeg's own exit code (0 = success, per
+        // @ffmpeg/ffmpeg's documented contract) — this used to be discarded
+        // entirely, leaving the ">10KB" file-size check as the ONLY signal
+        // for whether the stream copy actually worked. That heuristic can be
+        // wrong in both directions: a failed/incompatible-codec copy attempt
+        // can still leave a file over 10KB just from container header/atom
+        // overhead (silently handing back a corrupt "success" download), and
+        // a genuinely successful copy of a very short/small clip can be
+        // under 10KB and get needlessly discarded for a slower, lossy
+        // re-encode. Checking the real exit code fixes both.
+        // Passing `signal` lets ffmpeg.wasm actually abort mid-flight rather
+        // than the app only being able to discard the result afterward.
+        const copyExitCode = await ff.exec(['-i', inName, ...copyArgs, outName], -1, { signal })
         const copied = (await ff.readFile(outName).catch(() => null)) as Uint8Array | null
-        if (copied && copied.length > 10_000) {
+        if (copyExitCode === 0 && copied && copied.length > 0) {
           return new Blob([new Uint8Array(copied)], { type: OUTPUT_MIME[outputFormat] ?? 'video/mp4' })
         }
         await ff.deleteFile(outName).catch(() => { })
@@ -132,7 +154,10 @@ export async function convertVideo(
 
       // ── Slow path: full re-encode ──────────────────────────────────────────
       // BUG 11 FIX: '-y' ensures ffmpeg overwrites without interactive prompt
-      await ff.exec(['-y', '-i', inName, ...buildVideoArgs(outputFormat), outName])
+      const encodeExitCode = await ff.exec(['-y', '-i', inName, ...buildVideoArgs(outputFormat), outName], -1, { signal })
+      if (encodeExitCode !== 0) {
+        throw new Error(`ffmpeg failed to convert to .${outputFormat} (exit code ${encodeExitCode})`)
+      }
       const data = await ff.readFile(outName)
       return new Blob([new Uint8Array(data as Uint8Array)], { type: OUTPUT_MIME[outputFormat] ?? 'video/mp4' })
     } finally {

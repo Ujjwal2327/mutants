@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useMemo, useRef } from "react";
+import Link from "next/link";
 import { Dropzone } from "@/components/Dropzone";
 import { FileCard } from "@/components/FileCard";
 import { DownloadBar } from "@/components/DownloadBar";
@@ -11,6 +12,7 @@ import {
   buildOutputFilename,
   getTargets,
   estimateConversionMs,
+  FORMAT_REGISTRY,
 } from "@/lib/formatRegistry";
 import { downloadBlob } from "@/lib/utils";
 import type { ConvertibleFile } from "@/types/converter";
@@ -18,6 +20,32 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Zap, Trash2, Layers, XCircle } from "lucide-react";
 import { toast } from "sonner";
+
+// Short, accurate blurb per format category — shown in the "Supported file
+// formats" section below. Kept separate from Dropzone's own chip list (which
+// enumerates every extension) since this is prose meant to read as content,
+// not a re-statement of the same UI in a different skin.
+const FORMAT_HIGHLIGHTS: { label: string; examples: string }[] = [
+  {
+    label: "Images",
+    examples: "PNG, JPEG, WebP, GIF, AVIF, TIFF, ICO/CUR, SVG",
+  },
+  { label: "PDF", examples: "to image, text, HTML, Markdown, Word, or CSV" },
+  { label: "Spreadsheets", examples: "Excel, OpenDocument, CSV, TSV" },
+  {
+    label: "Documents",
+    examples: "Word, OpenDocument Text, Markdown, HTML, plain text, RTF",
+  },
+  {
+    label: "Data",
+    examples: "JSON, YAML, XML, TOML, INI, .properties, NDJSON",
+  },
+  { label: "Archives", examples: "ZIP, TAR, GZIP (including .tgz)" },
+  { label: "Fonts", examples: "TTF, OTF, WOFF, WOFF2" },
+  { label: "Audio", examples: "MP3, WAV, FLAC, AAC, OGG, Opus, and more" },
+  { label: "Video", examples: "MP4, WebM, MOV, MKV, AVI, and more" },
+];
+const TOTAL_FORMAT_COUNT = Object.keys(FORMAT_REGISTRY).length;
 
 export default function HomePage() {
   const [files, setFiles] = useState<ConvertibleFile[]>([]);
@@ -125,14 +153,18 @@ export default function HomePage() {
     const startedAt = Date.now();
     let estimatedMs = 1000;
 
-    // Create a fresh AbortController for this job
-    const controller = new AbortController();
-    abortControllers.current.set(id, controller);
-    const { signal } = controller;
+    // Check-and-mark "converting" happens first, atomically inside the
+    // functional setState updater (which React invokes synchronously), so
+    // we can reliably tell whether THIS call actually won the race to start
+    // a conversion before creating an AbortController or doing any work.
+    let alreadyConverting = false;
 
     setFiles((prev) => {
       const file = prev.find((f) => f.id === id);
-      if (!file || file.status === "converting") return prev;
+      if (!file || file.status === "converting") {
+        alreadyConverting = true;
+        return prev;
+      }
       estimatedMs = estimateConversionMs(file.file, file.inputFormat);
       return prev.map((f) =>
         f.id === id
@@ -149,6 +181,15 @@ export default function HomePage() {
           : f,
       );
     });
+    if (alreadyConverting) return;
+
+    // Only NOW create this job's AbortController - after we know this call
+    // is the one actually starting the conversion, so it can't clobber a
+    // controller that a genuinely-in-flight conversion for the same id is
+    // still relying on.
+    const controller = new AbortController();
+    abortControllers.current.set(id, controller);
+    const { signal } = controller;
 
     const snapshot = await new Promise<ConvertibleFile | undefined>((res) =>
       setFiles((prev) => {
@@ -408,6 +449,179 @@ export default function HomePage() {
             </div>
           </div>
         )}
+
+        {/* About / help content */}
+        <div className="space-y-10 sm:space-y-12 pt-2">
+          <Separator />
+
+          <section id="how-it-works" className="space-y-3">
+            <h2 className="text-xl sm:text-2xl font-semibold tracking-tight">
+              How Refom works
+            </h2>
+            <p className="text-sm text-muted-foreground leading-relaxed max-w-2xl">
+              Drop in one file or a hundred, pick a destination format for each,
+              and press Convert. Refom queues every job, shows live progress per
+              file, and downloads each result the moment it’s ready — no page
+              reload and no waiting room.
+            </p>
+            <ol className="space-y-2 text-sm text-muted-foreground max-w-2xl">
+              <li className="flex flex-col sm:flex-row sm:gap-2">
+                <span className="font-medium text-foreground shrink-0">
+                  1. Add files
+                </span>
+                <span>
+                  — drag them onto the drop zone or tap it to browse. Mix
+                  formats freely and add as many as you like.
+                </span>
+              </li>
+              <li className="flex flex-col sm:flex-row sm:gap-2">
+                <span className="font-medium text-foreground shrink-0">
+                  2. Pick a format
+                </span>
+                <span>
+                  — choose an output for each file, or use “Set all to” to send
+                  a whole batch to the same format at once.
+                </span>
+              </li>
+              <li className="flex flex-col sm:flex-row sm:gap-2">
+                <span className="font-medium text-foreground shrink-0">
+                  3. Convert
+                </span>
+                <span>
+                  — press Convert (or Convert all). Finish two or more files and
+                  a “Download all as ZIP” button appears.
+                </span>
+              </li>
+            </ol>
+          </section>
+
+          <section id="local-first" className="space-y-3">
+            <h2 className="text-xl sm:text-2xl font-semibold tracking-tight">
+              Everything stays on your device
+            </h2>
+            <p className="text-sm text-muted-foreground leading-relaxed max-w-2xl">
+              Your files are never uploaded. Image, PDF, spreadsheet, document,
+              data, archive, and font conversions all run instantly using your
+              browser’s own Canvas and File APIs. Audio and video conversions
+              use a compact WebAssembly build of FFmpeg that downloads once per
+              session and then also runs locally — the conversion engine is
+              fetched the first time you need it, but the file you’re converting
+              never crosses the network.
+            </p>
+          </section>
+
+          <section id="formats" className="space-y-3">
+            <h2 className="text-xl sm:text-2xl font-semibold tracking-tight">
+              Supported file formats
+            </h2>
+            <p className="text-sm text-muted-foreground leading-relaxed max-w-2xl">
+              {TOTAL_FORMAT_COUNT} formats across {FORMAT_HIGHLIGHTS.length}{" "}
+              categories, all converted on your device:
+            </p>
+            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
+              {FORMAT_HIGHLIGHTS.map(({ label, examples }) => (
+                <div key={label}>
+                  <dt className="font-medium">{label}</dt>
+                  <dd className="text-muted-foreground">{examples}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+
+          <section id="faq" className="space-y-4">
+            <h2 className="text-xl sm:text-2xl font-semibold tracking-tight">
+              Frequently asked questions
+            </h2>
+            <dl className="space-y-4 max-w-2xl">
+              <div>
+                <dt className="text-sm font-medium">
+                  Do you upload my files anywhere?
+                </dt>
+                <dd className="text-sm text-muted-foreground mt-1">
+                  No — conversion happens locally in your browser tab, and
+                  nothing about the file itself is sent to a server. See the{" "}
+                  <Link
+                    href="/privacy"
+                    className="underline underline-offset-4 hover:text-foreground"
+                  >
+                    Privacy Policy
+                  </Link>{" "}
+                  for the full picture.
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium">Is Refom free?</dt>
+                <dd className="text-sm text-muted-foreground mt-1">
+                  Yes. No account, no sign-up, no payment.
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium">
+                  Is there a file size limit?
+                </dt>
+                <dd className="text-sm text-muted-foreground mt-1">
+                  There’s no fixed cap. Since conversion runs on your device,
+                  the practical limit is your browser’s available memory — very
+                  large audio or video files just take longer.
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium">
+                  Which browsers are supported?
+                </dt>
+                <dd className="text-sm text-muted-foreground mt-1">
+                  Current versions of Chrome, Edge, Firefox, and Safari. A few
+                  formats have narrower support — AVIF encoding, for example,
+                  currently only works in Chromium-based browsers.
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium">
+                  Can I convert several files at once?
+                </dt>
+                <dd className="text-sm text-muted-foreground mt-1">
+                  Yes — add as many as you like, set formats individually or all
+                  at once with “Set all to,” then run them as a queue with
+                  “Convert all.”
+                </dd>
+              </div>
+            </dl>
+          </section>
+        </div>
+
+        {/* Footer */}
+        <footer className="pt-4 border-t text-xs text-muted-foreground flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <p>
+            Refom is free and runs entirely client-side — no accounts, no
+            tracking.
+          </p>
+          <nav className="flex flex-wrap gap-x-4 gap-y-1.5" aria-label="Footer">
+            <a
+              href="#how-it-works"
+              className="hover:text-foreground hover:underline underline-offset-4"
+            >
+              How it works
+            </a>
+            <a
+              href="#formats"
+              className="hover:text-foreground hover:underline underline-offset-4"
+            >
+              Formats
+            </a>
+            <a
+              href="#faq"
+              className="hover:text-foreground hover:underline underline-offset-4"
+            >
+              FAQ
+            </a>
+            <Link
+              href="/privacy"
+              className="hover:text-foreground hover:underline underline-offset-4"
+            >
+              Privacy
+            </Link>
+          </nav>
+        </footer>
       </div>
 
       <DownloadBar files={files} />

@@ -54,5 +54,14 @@ export async function getFFmpeg(): Promise<FFmpeg> {
     return ff
   })()
 
+  // If this load attempt fails (a transient network hiccup fetching the
+  // multi-megabyte wasm core, a CDN blip, etc.), clear the cached promise so
+  // the NEXT call actually tries again instead of permanently replaying the
+  // same rejection for the rest of the session. Without this, one failed
+  // load meant every future audio/video conversion — including clicking
+  // "Retry" — would fail immediately without even attempting to reload,
+  // recoverable only by refreshing the whole page.
+  _loading.catch(() => { _loading = null })
+
   return _loading
 }

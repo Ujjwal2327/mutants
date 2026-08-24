@@ -1,4 +1,3 @@
-import { fileToArrayBuffer } from '@/lib/utils'
 import * as fflate from 'fflate'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -30,6 +29,16 @@ interface TableRow {
 
 // ── Noise detection ───────────────────────────────────────────────────────────
 // Test the ENTIRE visual row text — if any pattern matches, skip the whole row.
+//
+// NOTE ON SCOPE: these patterns (and the column-position table below) were
+// written against one specific real-world statement layout. They only ever
+// run once looksLikeBankStatement() + the tableLooksPlausible() check further
+// down have both agreed a document really does match that layout, so a
+// pattern simply not matching a *different* bank's boilerplate text is
+// harmless — it costs a little unfiltered noise in the output, not wrong
+// data. The two gates around this file are what keep the feature safe on
+// documents this specific vocabulary was never tuned for; keep them, don't
+// just keep adding patterns here to "fix" a new document.
 const NOISE_ROW_PATTERNS: RegExp[] = [
   /www\.[a-z]+\.bank\.in/i,
   /Dial your Bank/i,
@@ -247,17 +256,70 @@ function splitMergedAmounts(str: string): string[] {
 }
 
 // ── Main table extraction ─────────────────────────────────────────────────────
+// The numeric heuristic in detectColumns() alone (>=5 decimal amounts on the
+// right side of the page) is common enough to trigger on plenty of documents
+// that aren't bank statements at all — any invoice, price list, or expense
+// report with a column of amounts. Before committing to this exact
+// bank-statement column layout and header labels ("S.No / Date / Cheque
+// Number / Transaction Remarks / Withdrawal / Deposit / Balance"), require
+// much stronger, more specific corroborating evidence.
+//
+// Generic financial vocabulary alone ("Balance", "Transaction") isn't
+// distinctive enough on its own — plenty of invoices and expense reports use
+// the same words — so this also requires BOTH Withdrawal and Deposit
+// (rather than either alone) plus a layout-specific marker ("S No" / "Cheque
+// Number") that's a much stronger signal of this exact column layout, not
+// just "a document about money".
+//
+// Even so, matching this vocabulary only means the document is WORTH
+// attempting to classify into columns — it doesn't mean the fixed pixel
+// offsets in detectColumns() actually line up with THIS document's layout
+// (a different bank's statement can use the same words in a differently
+// ordered/sized layout). extractTableRows() below runs a second,
+// structural check (tableLooksPlausible) on the actual extracted rows
+// before committing to returning them, which is the real safety net against
+// silently mis-columned data.
+function looksLikeBankStatement(allWords: TextWord[]): boolean {
+  const text = allWords.map(w => w.str).join(' ')
+  const hasBalance = /Balance/i.test(text)
+  const hasWithdrawalAndDeposit = /Withdrawal/i.test(text) && /Deposit/i.test(text)
+  const hasTransaction = /Transaction/i.test(text)
+  const hasLayoutMarker = /S\.?\s?No\.?/i.test(text) || /Cheque\s*Number/i.test(text)
+  return hasBalance && hasWithdrawalAndDeposit && hasTransaction && hasLayoutMarker
+}
+
+// Structural sanity check run on the ALREADY-EXTRACTED rows, independent of
+// which words/phrases happened to appear in the document. A genuine
+// transaction ledger has its balance column populated with a real amount on
+// essentially every row; if the column-position table above doesn't
+// actually match this document's layout, withdrawal/deposit/balance end up
+// empty or garbage far more often than not. This can only turn a
+// classification that was ALREADY wrong into a clean fallback to the
+// generic text extraction below — a correct extraction trivially has a
+// populated, numeric balance column, so this never rejects a genuinely
+// working case.
+function tableLooksPlausible(rows: TableRow[]): boolean {
+  if (rows.length < 2) return false
+  const amountRe = /^\d[\d,]*\.\d{2}$/
+  const withValidBalance = rows.filter(r => amountRe.test(r.balance)).length
+  return withValidBalance / rows.length >= 0.7
+}
+
 async function extractTableRows(
   pdf: Awaited<ReturnType<typeof import('pdfjs-dist')['getDocument']>['promise']>,
+  signal?: AbortSignal,
 ): Promise<TableRow[]> {
   const allPageWords: TextWord[][] = []
   for (let i = 1; i <= pdf.numPages; i++) {
+    signal?.throwIfAborted()
     const page = await pdf.getPage(i)
     allPageWords.push(await getPageWords(page))
   }
 
-  const cols = detectColumns(allPageWords.flat())
+  const flatWords = allPageWords.flat()
+  const cols = detectColumns(flatWords)
   if (!cols) return []
+  if (!looksLikeBankStatement(flatWords)) return []
 
   const rows: TableRow[] = []
   let current: TableRow | null = null
@@ -352,19 +414,26 @@ async function extractTableRows(
     row.cheque = row.cheque.trim()
   }
 
+  // Second gate: bail out to the generic text-extraction fallback unless the
+  // rows we actually built look like a real ledger. See tableLooksPlausible
+  // above for why this is the more important of the two checks.
+  if (!tableLooksPlausible(rows)) return []
+
   return rows
 }
 
 // ── Plain text extraction (non-table PDFs) ────────────────────────────────────
 async function getPdfPages(
-  buffer: ArrayBuffer,
+  getBytes: () => Promise<ArrayBuffer>,
+  signal?: AbortSignal,
 ): Promise<{ pageNum: number; text: string }[]> {
   const pdfjsLib = await import('pdfjs-dist')
   pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await getBytes()) }).promise
   const pages: { pageNum: number; text: string }[] = []
 
   for (let i = 1; i <= pdf.numPages; i++) {
+    signal?.throwIfAborted()
     const page = await pdf.getPage(i)
     const words = await getPageWords(page)
     if (words.length === 0) { pages.push({ pageNum: i, text: '' }); continue }
@@ -373,8 +442,21 @@ async function getPdfPages(
     const textLines: string[] = []
 
     for (const row of visualRows) {
+      // NOTE: this is the GENERIC extraction path used for every PDF that
+      // isn't a confirmed bank statement (see looksLikeBankStatement below) —
+      // i.e. the vast majority of real-world PDFs (letters, reports, resumes,
+      // invoices, articles...). It deliberately does NOT apply
+      // isNoiseRow/isPageNumberRow here: those were written for one
+      // specific bank's statement boilerplate (phone numbers, OTP warnings,
+      // "Sincerely,", etc.) and, applied globally, silently deleted ordinary
+      // content that happened to match — e.g. a perfectly normal letter's
+      // "Sincerely," closing, or any row that was just a short number.
+      // Faithful extraction is the priority for the general case; that
+      // bank-statement-specific cleanup is applied only within
+      // extractTableRows, which only ever runs once a real bank statement
+      // has been positively identified.
       const rowText = row.map(w => w.str).join(' ')
-      if (isNoiseRow(rowText) || isPageNumberRow(rowText)) continue
+      if (!rowText.trim()) continue
       const sorted = [...row].sort((a, b) => a.x - b.x)
       let lineText = ''
       for (let j = 0; j < sorted.length; j++) {
@@ -408,6 +490,32 @@ async function renderPageToBlob(
   await page.render({ canvas, canvasContext: ctx, viewport }).promise
   return new Promise((res, rej) =>
     canvas.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), mime, 0.92))
+}
+
+// ── Heading detection for the prose-PDF -> DOCX fallback ──────────────────────
+// The plain-text fallback path has no font-size/boldness information to work
+// with (getPdfPages only returns flat strings), so it has to guess "is this
+// line a section heading" from the text alone. The previous heuristic
+// ("is the whole line uppercase") was far too permissive: plenty of
+// real-world documents (lab reports, invoices, forms) write DATA labels in
+// caps too, so lines like "HAEMATOCRIT : 42.5 % 40.0 - 50.0" - an actual
+// measured result, not a heading - were being styled as a Heading 2,
+// scattering bold section-heading formatting across ordinary data
+// throughout the document. Requiring the absence of a colon-then-value
+// pattern and of any digits (both strong "this is a data row, not a
+// heading" signals) fixes the common, high-impact case while still
+// recognizing genuine section titles like "COMPLETE BLOOD COUNT (CBC)".
+function looksLikeHeading(line: string): boolean {
+  if (line.length <= 2 || line.length > 70) return false
+  if (line !== line.toUpperCase()) return false
+  if (!/[A-Z]/.test(line)) return false
+  if (/\d/.test(line)) return false
+  // Allow a heading that simply ends with a colon ("LIMITATIONS:", "NOTE:"),
+  // but reject "Label : Value" data lines - the giveaway is content AFTER
+  // the colon, not the colon's mere presence.
+  const colonIdx = line.indexOf(':')
+  if (colonIdx !== -1 && line.slice(colonIdx + 1).trim().length > 0) return false
+  return true
 }
 
 // ── Output formatters ─────────────────────────────────────────────────────────
@@ -503,18 +611,23 @@ function rowsToTxt(rows: TableRow[]): string {
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
-export async function convertPdf(file: File, outputFormat: string): Promise<Blob> {
-  const buffer = await fileToArrayBuffer(file)
+export async function convertPdf(file: File, outputFormat: string, signal?: AbortSignal): Promise<Blob> {
+  signal?.throwIfAborted()
+  // Read fresh bytes from the File right before each pdfjs getDocument()
+  // call, rather than sharing one ArrayBuffer (even via .slice() copies)
+  // across multiple calls - see the fuller explanation above getPdfPages.
+  const freshBytes = () => file.arrayBuffer()
 
   // PNG/JPEG: render pages as images
   if (outputFormat === 'png' || outputFormat === 'jpeg') {
     const pdfjsLib = await import('pdfjs-dist')
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
-    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise
+    const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await freshBytes()) }).promise
     const mime = outputFormat === 'png' ? 'image/png' : 'image/jpeg'
     if (pdf.numPages === 1) return renderPageToBlob(pdf, 1, 2, mime)
     const zipInput: Record<string, Uint8Array> = {}
     for (let i = 1; i <= pdf.numPages; i++) {
+      signal?.throwIfAborted()
       const blob = await renderPageToBlob(pdf, i, 2, mime)
       zipInput[`page-${String(i).padStart(3, '0')}.${outputFormat}`] = new Uint8Array(await blob.arrayBuffer())
     }
@@ -524,14 +637,14 @@ export async function convertPdf(file: File, outputFormat: string): Promise<Blob
   // All text-based outputs: attempt table extraction first
   const pdfjsLib = await import('pdfjs-dist')
   pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs'
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise
-  const tableRows = await extractTableRows(pdf)
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await freshBytes()) }).promise
+  const tableRows = await extractTableRows(pdf, signal)
   const hasTable = tableRows.length > 0
 
   // ── HTML ──────────────────────────────────────────────────────────────────
   if (outputFormat === 'html') {
     if (hasTable) return new Blob([rowsToHtml(tableRows, file.name)], { type: 'text/html' })
-    const pages = await getPdfPages(buffer.slice(0))
+    const pages = await getPdfPages(freshBytes, signal)
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     const body = pages.map(p => {
       const bodyHtml = p.text
@@ -559,7 +672,7 @@ export async function convertPdf(file: File, outputFormat: string): Promise<Blob
   // ── CSV ────────────────────────────────────────────────────────────────────
   if (outputFormat === 'csv') {
     if (hasTable) return new Blob([rowsToCsv(tableRows)], { type: 'text/csv' })
-    const pages = await getPdfPages(buffer.slice(0))
+    const pages = await getPdfPages(freshBytes, signal)
     const csvRows: string[] = []
     for (const page of pages) {
       for (const line of page.text.split('\n')) {
@@ -576,7 +689,7 @@ export async function convertPdf(file: File, outputFormat: string): Promise<Blob
   // ── Markdown ───────────────────────────────────────────────────────────────
   if (outputFormat === 'md') {
     if (hasTable) return new Blob([rowsToMd(tableRows, file.name)], { type: 'text/markdown' })
-    const pages = await getPdfPages(buffer.slice(0))
+    const pages = await getPdfPages(freshBytes, signal)
     const md = pages.map(p => {
       const body = p.text
         ? p.text.split(/\n\n+/).map(para => para.replace(/\n/g, '  \n').trim()).filter(Boolean).join('\n\n')
@@ -589,7 +702,7 @@ export async function convertPdf(file: File, outputFormat: string): Promise<Blob
   // ── TXT ───────────────────────────────────────────────────────────────────
   if (outputFormat === 'txt') {
     if (hasTable) return new Blob([rowsToTxt(tableRows)], { type: 'text/plain' })
-    const pages = await getPdfPages(buffer.slice(0))
+    const pages = await getPdfPages(freshBytes, signal)
     return new Blob([pages.map(p =>
       `--- Page ${p.pageNum} ---\n${p.text || '(no extractable text on this page)'}`
     ).join('\n\n')], { type: 'text/plain' })
@@ -622,7 +735,7 @@ export async function convertPdf(file: File, outputFormat: string): Promise<Blob
     }
 
     // Fallback: text-based DOCX for prose PDFs
-    const pages = await getPdfPages(buffer.slice(0))
+    const pages = await getPdfPages(freshBytes, signal)
     const totalText = pages.map(p => p.text).join('')
     if (totalText.trim().length > 50) {
       const children: InstanceType<typeof Paragraph>[] = []
@@ -633,7 +746,7 @@ export async function convertPdf(file: File, outputFormat: string): Promise<Blob
           for (const line of para.split('\n')) {
             const trimmed = line.trim()
             if (!trimmed) continue
-            const isHeading = trimmed === trimmed.toUpperCase() && trimmed.length < 80 && trimmed.length > 2
+            const isHeading = looksLikeHeading(trimmed)
             children.push(new Paragraph({ heading: isHeading ? HeadingLevel.HEADING_2 : undefined, children: [new TextRun(trimmed)] }))
           }
         }
@@ -643,9 +756,10 @@ export async function convertPdf(file: File, outputFormat: string): Promise<Blob
     }
 
     // Image-based DOCX fallback for scanned PDFs
-    const pdf2 = await pdfjsLib.getDocument({ data: new Uint8Array(buffer.slice(0)) }).promise
+    const pdf2 = await pdfjsLib.getDocument({ data: new Uint8Array(await freshBytes()) }).promise
     const children2: InstanceType<typeof Paragraph>[] = []
     for (let i = 1; i <= pdf2.numPages; i++) {
+      signal?.throwIfAborted()
       const page = await pdf2.getPage(i)
       const viewport = page.getViewport({ scale: 1.5 })
       const canvas = document.createElement('canvas')

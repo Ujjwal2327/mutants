@@ -1,45 +1,25 @@
 import { fileToText } from '@/lib/utils'
 import * as yaml from 'js-yaml'
+import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
+import Papa from 'papaparse'
 
-// ── Delimited parser (CSV/TSV) ────────────────────────────────────────────────
-function parseDelimited(text: string, delim: string): string[][] {
-  const rows: string[][] = []
-  let row: string[] = []
-  let field = ''
-  let inQuotes = false
-  let i = 0
-
-  while (i < text.length) {
-    const char = text[i]
-    if (inQuotes) {
-      if (char === '"') {
-        if (text[i + 1] === '"') { field += '"'; i += 2; continue }
-        inQuotes = false; i++; continue
-      }
-      field += char; i++; continue
-    }
-    if (char === '"') { inQuotes = true; i++; continue }
-    if (char === delim) { row.push(field); field = ''; i++; continue }
-    if (char === '\r') { i++; continue }
-    if (char === '\n') { row.push(field); rows.push(row); row = []; field = ''; i++; continue }
-    field += char; i++
-  }
-  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row) }
-  return rows.filter((r) => !(r.length === 1 && r[0] === ''))
-}
-
-function toCsv(rows: string[][], delim = ','): string {
-  return rows.map(r =>
-    r.map(c => {
-      const needsQuote = c.includes(delim) || c.includes('"') || c.includes('\n') || c.includes('\r') ||
-        (delim === '\t' ? false : c.includes('\t'))
-      return needsQuote ? `"${c.replace(/"/g, '""')}"` : c
-    }).join(delim)
-  ).join('\n')
+// ── Shared object-shape helper ────────────────────────────────────────────────
+// A "should I recurse into this as a nested structure" check used by the XML /
+// INI / Properties serializers below. Deliberately excludes Date — TOML input
+// is now parsed by smol-toml (see the TOML section further down), which
+// returns real `Date` instances (a `TomlDate` subclass) for date/time values
+// instead of plain strings. Date has no own enumerable properties, so
+// treating one as "a nested object" and walking it with Object.entries()
+// silently produces an empty node (XML/INI) or drops the value entirely
+// (Properties) instead of the actual date. Every serializer below that
+// branches on "object vs. scalar" needs to agree Date counts as a scalar.
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date)
 }
 
 function stringifyCell(value: unknown): string {
   if (value === null || value === undefined) return ''
+  if (value instanceof Date) return value.toISOString()
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
 }
@@ -51,28 +31,105 @@ function escapeXml(value: string): string {
     .replace(/"/g, '&quot;').replace(/'/g, '&apos;')
 }
 
+// Object keys prefixed with '@' represent XML attributes (this is the
+// convention xmlToJson below uses when reading XML, and a common one for
+// hand-authored JSON meant to become XML-with-attributes). Splitting them
+// out lets jsonToXml render them into the opening tag itself instead of as
+// child elements — otherwise an XML→JSON→XML round trip (or JSON authored
+// with this convention) silently turns every attribute into a same-named
+// child element, changing the document's shape.
+function splitAttributes(obj: Record<string, unknown>): { attrs: Record<string, unknown>; rest: Record<string, unknown> } {
+  const attrs: Record<string, unknown> = {}
+  const rest: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (k.startsWith('@') && k.length > 1) attrs[k.slice(1)] = v
+    else rest[k] = v
+  }
+  return { attrs, rest }
+}
+
+function attrString(attrs: Record<string, unknown>): string {
+  return Object.entries(attrs)
+    .map(([k, v]) => {
+      const safeKey = k.replace(/[^a-zA-Z0-9_.-]/g, '_').replace(/^([^a-zA-Z_])/, '_$1') || 'attr'
+      return ` ${safeKey}="${escapeXml(stringifyCell(v))}"`
+    })
+    .join('')
+}
+
+// Renders one <tag>...</tag> element for a (possibly attribute-bearing)
+// value. Pulled out of jsonToXml's own recursion so the parent — which is
+// the one that knows the tag name — can place attributes in the opening
+// tag rather than the child call, which only knows the tag's contents.
+function renderElement(tag: string, val: unknown, indent: string): string {
+  if (isPlainRecord(val)) {
+    const { attrs, rest } = splitAttributes(val)
+    const a = attrString(attrs)
+    // '#text' is the mirror-image convention xmlToJson uses for a leaf
+    // element that carries both attributes and direct text content (e.g.
+    // <price currency="USD">19.99</price>) — render it as the element's own
+    // text rather than as a nested <_text> child.
+    if ('#text' in rest && Object.keys(rest).length === 1) {
+      return `${indent}<${tag}${a}>${jsonToXml(rest['#text'])}</${tag}>`
+    }
+    return `${indent}<${tag}${a}>${jsonToXml(rest, indent)}</${tag}>`
+  }
+  return `${indent}<${tag}>${jsonToXml(val)}</${tag}>`
+}
+
 function jsonToXml(val: unknown, indent = ''): string {
+  if (val instanceof Date) return escapeXml(val.toISOString())
   if (Array.isArray(val))
+    // A bare array with no enclosing object key (e.g. the document's root value
+    // is itself an array, or an array nested directly inside another array).
+    // There's no natural tag name to reuse here, so fall back to a generic
+    // <item> wrapper per element.
     return val.map(v => `${indent}<item>${jsonToXml(v, indent + '  ')}</item>`).join('\n')
-  if (val !== null && typeof val === 'object')
-    return '\n' + Object.entries(val as Record<string, unknown>)
+  if (isPlainRecord(val))
+    return '\n' + Object.entries(val)
       .map(([k, v]) => {
         const safeKey = k.replace(/[^a-zA-Z0-9_.-]/g, '_').replace(/^([^a-zA-Z_])/, '_$1') || 'field'
-        return `${indent}  <${safeKey}>${jsonToXml(v, indent + '  ')}</${safeKey}>`
+        if (Array.isArray(v)) {
+          // Represent an array-valued property as repeated sibling elements
+          // using the property's OWN tag name (e.g. <skill>Java</skill>
+          // <skill>Go</skill>) instead of nesting a generic <item> wrapper
+          // inside <skill>. xmlToJson already collapses repeated same-named
+          // sibling tags back into an array, so this makes the round trip
+          // symmetric instead of introducing an extra `{ item: [...] }`
+          // wrapper object around every array property.
+          if (v.length === 0) return `${indent}  <${safeKey}></${safeKey}>`
+          return v
+            .map((item) => renderElement(safeKey, item, indent + '  '))
+            .join('\n')
+        }
+        return renderElement(safeKey, v, indent + '  ')
       }).join('\n') + `\n${indent}`
-  // FIX: use String(val) so null renders as "null" in XML rather than empty string,
-  // preserving round-trip fidelity
-  return escapeXml(val === null || val === undefined ? '' : String(val))
+  // Render null/undefined as the literal text "null" (rather than an empty
+  // element, which is indistinguishable from an empty string) so it
+  // round-trips recognizably instead of silently turning into "".
+  return escapeXml(val === null || val === undefined ? 'null' : String(val))
 }
 
 function xmlToJson(xml: string): unknown {
   const doc = new DOMParser().parseFromString(xml, 'application/xml')
-  const parseError = doc.querySelector('parseerror')
+  const parseError = doc.querySelector('parsererror')
   if (parseError) throw new Error(`Invalid XML: ${parseError.textContent?.slice(0, 200)}`)
   function parse(node: Element): unknown {
-    if (node.children.length === 0) return node.textContent ?? ''
+    const attrs = Array.from(node.attributes)
+    if (node.children.length === 0) {
+      // Leaf element (no child ELEMENTS — the overwhelmingly common case for
+      // ordinary data-shaped XML like <name>John</name>). Previously this
+      // returned the bare text and skipped attribute collection entirely,
+      // so any attributes on a leaf element were silently lost.
+      if (attrs.length === 0) return node.textContent ?? ''
+      const obj: Record<string, unknown> = {}
+      for (const attr of attrs) obj[`@${attr.name}`] = attr.value
+      const text = node.textContent ?? ''
+      if (text) obj['#text'] = text
+      return obj
+    }
     const obj: Record<string, unknown> = {}
-    for (const attr of Array.from(node.attributes)) obj[`@${attr.name}`] = attr.value
+    for (const attr of attrs) obj[`@${attr.name}`] = attr.value
     for (const child of Array.from(node.children)) {
       const k = child.tagName
       const v = parse(child)
@@ -97,8 +154,8 @@ function jsonToRows(parsed: unknown): { headers: string[]; rows: string[][] } | 
       return { headers: ['value'], rows: parsed.map(item => [stringifyCell(item)]) }
     }
     arr = parsed as Record<string, unknown>[]
-  } else if (parsed !== null && typeof parsed === 'object') {
-    const obj = parsed as Record<string, unknown>
+  } else if (isPlainRecord(parsed)) {
+    const obj = parsed
     const keys = Object.keys(obj).filter(k => !k.startsWith('@'))
     const arrayKey = keys.find(k => Array.isArray(obj[k]))
     if (arrayKey) {
@@ -123,141 +180,21 @@ function jsonToRows(parsed: unknown): { headers: string[]; rows: string[][] } | 
   return { headers, rows }
 }
 
-// ── TOML parser ───────────────────────────────────────────────────────────────
-function splitTomlArrayItems(inner: string): string[] {
-  const items: string[] = []
-  let depth = 0, inQuotes = false, current = ''
-  for (let i = 0; i < inner.length; i++) {
-    const c = inner[i]
-    if (inQuotes) {
-      current += c
-      if (c === '"' && inner[i - 1] !== '\\') inQuotes = false
-      continue
-    }
-    if (c === '"') { inQuotes = true; current += c; continue }
-    if (c === '[') { depth++; current += c; continue }
-    if (c === ']') { depth--; current += c; continue }
-    if (c === ',' && depth === 0) { items.push(current.trim()); current = ''; continue }
-    current += c
-  }
-  if (current.trim()) items.push(current.trim())
-  return items
-}
-
-function parseTomlValue(raw: string): unknown {
-  const val = raw.trim()
-  if (val.startsWith('[') && val.endsWith(']')) {
-    const inner = val.slice(1, -1).trim()
-    return inner ? splitTomlArrayItems(inner).map(parseTomlValue) : []
-  }
-  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
-    return val.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-  if (val === 'true') return true
-  if (val === 'false') return false
-  if (val !== '' && !isNaN(Number(val))) return Number(val)
-  // FIX: strip inline comments from unquoted string values
-  // TOML uses # for inline comments; strip everything after an unquoted #
-  const commentIdx = val.indexOf('#')
-  if (commentIdx > 0) return val.slice(0, commentIdx).trimEnd()
-  return val
-}
-
-function parseTOML(src: string): Record<string, unknown> {
-  const root: Record<string, unknown> = {}
-  let cur = root
-  // FIX: track current array-of-tables key for [[table]] syntax
-  let curArrayKey: string | null = null
-
-  for (const line of src.split('\n')) {
-    const t = line.trim()
-    if (!t || t.startsWith('#')) continue
-
-    // FIX: handle [[array-of-tables]] double-bracket syntax
-    const aam = t.match(/^\[\[([^\]]+)\]\]$/)
-    if (aam) {
-      const keyPath = aam[1].split('.').map(k => k.trim())
-      let node: Record<string, unknown> = root
-      for (let i = 0; i < keyPath.length - 1; i++) {
-        const k = keyPath[i]
-        if (typeof node[k] !== 'object' || node[k] === null) node[k] = {}
-        node = node[k] as Record<string, unknown>
-      }
-      const lastKey = keyPath[keyPath.length - 1]
-      if (!Array.isArray(node[lastKey])) node[lastKey] = []
-      const newEntry: Record<string, unknown> = {}
-        ; (node[lastKey] as Record<string, unknown>[]).push(newEntry)
-      cur = newEntry
-      curArrayKey = lastKey
-      continue
-    }
-
-    // Standard [table] single-bracket
-    const sm = t.match(/^\[([^\]]+)\]$/)
-    if (sm) {
-      curArrayKey = null
-      let node = root
-      for (const key of sm[1].split('.').map(k => k.trim())) {
-        if (typeof node[key] !== 'object' || node[key] === null || Array.isArray(node[key])) node[key] = {}
-        node = node[key] as Record<string, unknown>
-      }
-      cur = node; continue
-    }
-    const kv = t.match(/^([\w.-]+)\s*=\s*(.+)$/)
-    if (!kv) continue
-    cur[kv[1]] = parseTomlValue(kv[2])
-  }
-  return root
-}
-
-function tomlEscape(str: string): string {
-  return str.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-}
-
-function tomlScalar(value: unknown): string {
-  if (typeof value === 'string') return `"${tomlEscape(value)}"`
-  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
-  if (Array.isArray(value)) return `[${value.map(tomlScalar).join(', ')}]`
-  return `"${tomlEscape(String(value ?? ''))}"`
-}
-
-function stringifyTomlTable(data: Record<string, unknown>, prefix: string): string {
-  const scalarLines: string[] = []
-  const tableSections: string[] = []
-  for (const [key, value] of Object.entries(data)) {
-    if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object' && value[0] !== null) {
-      // FIX: emit array-of-tables using [[key]] syntax
-      const path = prefix ? `${prefix}.${key}` : key
-      for (const item of value as Record<string, unknown>[]) {
-        const body = stringifyTomlTable(item, '')
-        tableSections.push(`[[${path}]]${body ? '\n' + body : ''}`)
-      }
-    } else if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-      const path = prefix ? `${prefix}.${key}` : key
-      const nested = stringifyTomlTable(value as Record<string, unknown>, path)
-      tableSections.push(`[${path}]${nested ? '\n' + nested : ''}`)
-    } else {
-      scalarLines.push(`${key} = ${tomlScalar(value)}`)
-    }
-  }
-  return [...scalarLines, ...tableSections].join('\n')
-}
-
-function stringifyToml(data: unknown): string {
-  if (Array.isArray(data)) {
-    // FIX: top-level array — if objects, emit as [[items]] array-of-tables
-    if (data.length > 0 && typeof data[0] === 'object' && data[0] !== null && !Array.isArray(data[0])) {
-      return (data as Record<string, unknown>[])
-        .map(item => {
-          const body = stringifyTomlTable(item, '')
-          return `[[items]]${body ? '\n' + body : ''}`
-        })
-        .join('\n\n')
-    }
-    // Primitive arrays at top level — emit as TOML array
-    return `items = ${tomlScalar(data)}`
-  }
-  if (data !== null && typeof data === 'object') return stringifyTomlTable(data as Record<string, unknown>, '')
-  return tomlScalar(data)
+// ── TOML ──────────────────────────────────────────────────────────────────────
+// Parsing/serializing is delegated entirely to smol-toml (spec-compliant,
+// actively maintained) instead of a hand-written parser. The previous
+// hand-rolled version didn't understand inline tables (`{ x = 1, y = 2 }`),
+// TOML dates, or multi-line strings — each of those silently produced a
+// wrong value instead of an error, which is worse than not supporting them.
+//
+// TOML has no concept of a bare top-level array or scalar — every document
+// must be a table — so non-object roots (e.g. a CSV file, which becomes an
+// array of row-objects) are wrapped under an "items" key, same as the old
+// implementation did, so those conversions still produce a sensible file
+// instead of smol-toml's "stringify can only be called with an object" error.
+function toTomlDocument(data: unknown): Record<string, unknown> {
+  if (isPlainRecord(data)) return data
+  return { items: data }
 }
 
 // ── INI ───────────────────────────────────────────────────────────────────────
@@ -299,24 +236,25 @@ function parseINI(src: string): Record<string, unknown> {
 
 function stringifyINIScalar(value: unknown): string {
   if (Array.isArray(value)) return value.map(v => stringifyINIScalar(v)).join(', ')
+  if (value instanceof Date) return value.toISOString()
   return String(value ?? '')
 }
 
 function stringifyINI(data: unknown): string {
-  if (data === null || typeof data !== 'object') return stringifyINIScalar(data)
-  const obj = data as Record<string, unknown>
+  if (!isPlainRecord(data)) return stringifyINIScalar(data)
+  const obj = data
   const rootLines: string[] = []
   const sections: [string, Record<string, unknown>][] = []
   for (const [key, value] of Object.entries(obj)) {
-    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-      sections.push([key, value as Record<string, unknown>])
+    if (isPlainRecord(value)) {
+      sections.push([key, value])
     } else {
       rootLines.push(`${key} = ${stringifyINIScalar(value)}`)
     }
   }
   const sectionBlocks = sections.map(([name, section]) => {
     const lines = Object.entries(section).map(([key, value]) => {
-      if (value !== null && typeof value === 'object' && !Array.isArray(value))
+      if (isPlainRecord(value))
         return `${key} = ${JSON.stringify(value)}`
       return `${key} = ${stringifyINIScalar(value)}`
     })
@@ -329,11 +267,11 @@ function stringifyINI(data: unknown): string {
 function flattenForProperties(obj: unknown, prefix = '', out: Record<string, string> = {}): Record<string, string> {
   if (Array.isArray(obj)) {
     obj.forEach((v, i) => flattenForProperties(v, prefix ? `${prefix}.${i}` : String(i), out))
-  } else if (obj !== null && typeof obj === 'object') {
-    for (const [k, v] of Object.entries(obj as Record<string, unknown>))
+  } else if (isPlainRecord(obj)) {
+    for (const [k, v] of Object.entries(obj))
       flattenForProperties(v, prefix ? `${prefix}.${k}` : k, out)
   } else {
-    out[prefix] = obj === null || obj === undefined ? '' : String(obj)
+    out[prefix] = obj === null || obj === undefined ? '' : obj instanceof Date ? obj.toISOString() : String(obj)
   }
   return out
 }
@@ -351,7 +289,26 @@ function unflattenProperties(flat: Record<string, string>): unknown {
       }
     })
   }
-  return root
+  return arrayifyNumericKeys(root)
+}
+
+// flattenForProperties represents arrays via consecutive numeric-index keys
+// (e.g. list.0, list.1, ...) since .properties has no native array syntax.
+// Object key enumeration order always puts integer-like keys first in
+// ascending numeric order regardless of insertion order, so checking that a
+// node's keys are exactly "0".."n-1" reliably identifies these and converts
+// them back into real arrays instead of leaving `{ "0": ..., "1": ... }`
+// objects, which would otherwise change the data's shape on round trip.
+function arrayifyNumericKeys(node: unknown): unknown {
+  if (node === null || typeof node !== 'object' || Array.isArray(node)) return node
+  const obj = node as Record<string, unknown>
+  const keys = Object.keys(obj)
+  const isArrayLike = keys.length > 0 && keys.every((k, i) => k === String(i))
+  const values = keys.map((k) => arrayifyNumericKeys(obj[k]))
+  if (isArrayLike) return values
+  const result: Record<string, unknown> = {}
+  keys.forEach((k, i) => { result[k] = values[i] })
+  return result
 }
 
 function parseProperties(src: string): Record<string, string> {
@@ -391,8 +348,8 @@ function normaliseToRows(parsed: unknown): Record<string, unknown>[] {
     }
     return parsed as Record<string, unknown>[]
   }
-  if (parsed !== null && typeof parsed === 'object') {
-    const obj = parsed as Record<string, unknown>
+  if (isPlainRecord(parsed)) {
+    const obj = parsed
     const keys = Object.keys(obj)
     if (keys.length === 1 && Array.isArray(obj[keys[0]])) return obj[keys[0]] as Record<string, unknown>[]
     return [obj]
@@ -411,7 +368,8 @@ function deduplicateHeaders(headers: string[]): string[] {
   })
 }
 
-export async function convertData(file: File, outputFormat: string): Promise<Blob> {
+export async function convertData(file: File, outputFormat: string, signal?: AbortSignal): Promise<Blob> {
+  signal?.throwIfAborted()
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
   // FIX: strip BOM from text files (common in Windows-exported files)
   let text = await fileToText(file)
@@ -422,19 +380,19 @@ export async function convertData(file: File, outputFormat: string): Promise<Blo
   if (ext === 'json') parsed = JSON.parse(text)
   else if (ext === 'yaml' || ext === 'yml') parsed = yaml.load(text)
   else if (ext === 'xml') parsed = xmlToJson(text)
-  else if (ext === 'toml') parsed = parseTOML(text)
+  else if (ext === 'toml') parsed = parseToml(text)
   else if (ext === 'ini') parsed = parseINI(text)
   else if (ext === 'properties') parsed = unflattenProperties(parseProperties(text))
   else if (ext === 'ndjson') parsed = parseNDJSON(text)
-  else if (ext === 'csv') {
-    const [rawHeaders, ...rows] = parseDelimited(text, ',')
-    if (!rawHeaders) throw new Error('CSV file appears to be empty')
-    // FIX: deduplicate column headers to avoid silent data loss
-    const headers = deduplicateHeaders(rawHeaders)
-    parsed = rows.map(r => Object.fromEntries(headers.map((h, i) => [h, r[i] ?? ''])))
-  } else if (ext === 'tsv') {
-    const [rawHeaders, ...rows] = parseDelimited(text, '\t')
-    if (!rawHeaders) throw new Error('TSV file appears to be empty')
+  else if (ext === 'csv' || ext === 'tsv') {
+    // Delimited parsing is delegated to papaparse instead of a hand-written
+    // tokenizer — it correctly handles the real-world dialects (embedded
+    // newlines/commas inside quoted fields, stray whitespace, etc.) that a
+    // bespoke parser tends to only catch one bug report at a time.
+    const delimiter = ext === 'tsv' ? '\t' : ','
+    const { data } = Papa.parse<string[]>(text, { delimiter, skipEmptyLines: true })
+    const [rawHeaders, ...rows] = data
+    if (!rawHeaders) throw new Error(`${ext.toUpperCase()} file appears to be empty`)
     // FIX: deduplicate column headers to avoid silent data loss
     const headers = deduplicateHeaders(rawHeaders)
     parsed = rows.map(r => Object.fromEntries(headers.map((h, i) => [h, r[i] ?? ''])))
@@ -449,15 +407,23 @@ export async function convertData(file: File, outputFormat: string): Promise<Blo
     return new Blob([yaml.dump(parsed, { lineWidth: 120 })], { type: 'application/x-yaml' })
 
   // ── XML ───────────────────────────────────────────────────────────────────
-  if (outputFormat === 'xml')
+  if (outputFormat === 'xml') {
+    let rootAttrs = ''
+    let rootVal = parsed
+    if (isPlainRecord(parsed)) {
+      const { attrs, rest } = splitAttributes(parsed)
+      rootAttrs = attrString(attrs)
+      rootVal = rest
+    }
     return new Blob(
-      [`<?xml version="1.0" encoding="UTF-8"?>\n<root>${jsonToXml(parsed)}\n</root>`],
+      [`<?xml version="1.0" encoding="UTF-8"?>\n<root${rootAttrs}>${jsonToXml(rootVal)}\n</root>`],
       { type: 'application/xml' }
     )
+  }
 
   // ── TOML ──────────────────────────────────────────────────────────────────
   if (outputFormat === 'toml')
-    return new Blob([stringifyToml(parsed)], { type: 'application/toml' })
+    return new Blob([stringifyToml(toTomlDocument(parsed))], { type: 'application/toml' })
 
   // ── INI ───────────────────────────────────────────────────────────────────
   if (outputFormat === 'ini')
@@ -480,7 +446,7 @@ export async function convertData(file: File, outputFormat: string): Promise<Blo
     if (ext === 'xml') {
       const result = xmlToRows(text)
       if (result && result.headers.length > 0) {
-        return new Blob([toCsv([result.headers, ...result.rows], delim)], { type: mimeType })
+        return new Blob([Papa.unparse([result.headers, ...result.rows], { delimiter: delim })], { type: mimeType })
       }
     }
 
@@ -491,7 +457,7 @@ export async function convertData(file: File, outputFormat: string): Promise<Blo
       new Set(rows.flatMap(r => (r && typeof r === 'object') ? Object.keys(r) : []))
     )
     return new Blob(
-      [toCsv([headers, ...rows.map(r => headers.map(h => stringifyCell(r?.[h])))], delim)],
+      [Papa.unparse([headers, ...rows.map(r => headers.map(h => stringifyCell(r?.[h])))], { delimiter: delim })],
       { type: mimeType }
     )
   }

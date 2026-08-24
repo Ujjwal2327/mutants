@@ -7,24 +7,40 @@ const MIME_MAP: Record<string, string> = {
 
 const NEEDS_SPECIAL_DECODER = new Set(['tiff', 'ico', 'cur'])
 
-function parseSvgViewBoxSize(svgText: string): { width: number; height: number } | null {
-  const match = svgText.match(/viewBox\s*=\s*["']\s*[\d.+-]+\s+[\d.+-]+\s+([\d.]+)\s+([\d.]+)\s*["']/i)
-  return match ? { width: parseFloat(match[1]), height: parseFloat(match[2]) } : null
-}
+// Reads an SVG's own intrinsic size via a real parser instead of regexing
+// the raw text. Regex on raw markup has two real failure modes here: it
+// matches the FIRST `width=`/`viewBox=` it finds anywhere in the file —
+// which can belong to a nested inner <svg> or any other element, not the
+// root — and the old viewBox pattern required whitespace between its four
+// numbers, silently failing on the equally-valid comma-separated form
+// (`viewBox="0,0,64,64"`) the SVG spec also allows. Parsing for real and
+// reading attributes off the actual root element sidesteps both.
+function parseSvgIntrinsicSize(svgText: string): { width: number; height: number } | null {
+  let doc: Document
+  try {
+    doc = new DOMParser().parseFromString(svgText, 'image/svg+xml')
+  } catch {
+    return null
+  }
+  if (doc.querySelector('parsererror')) return null
+  const root = doc.documentElement
+  if (!root || root.nodeName.toLowerCase() !== 'svg') return null
 
-function parseSvgExplicitSize(svgText: string): { width: number; height: number } | null {
-  const wMatch = svgText.match(/\bwidth\s*=\s*["']?(\d+(?:\.\d+)?)(?:px)?["']?/i)
-  const hMatch = svgText.match(/\bheight\s*=\s*["']?(\d+(?:\.\d+)?)(?:px)?["']?/i)
-  if (!wMatch || !hMatch) return null
-  // FIX: reject non-pixel units (%, em, rem, vw, vh, etc.).
-  // The old regex captured the numeric part of "100%" as 100 and "10em" as 10,
-  // causing SVGs with relative dimensions to be rendered at the wrong (tiny) size.
-  // Check the character immediately after the full match; if it is a letter or '%'
-  // then the value carries a non-pixel unit suffix — fall back to viewBox instead.
-  const wEnd = svgText[wMatch.index! + wMatch[0].length] ?? ''
-  const hEnd = svgText[hMatch.index! + hMatch[0].length] ?? ''
-  if (/[%a-zA-Z]/.test(wEnd) || /[%a-zA-Z]/.test(hEnd)) return null
-  return { width: parseFloat(wMatch[1]), height: parseFloat(hMatch[1]) }
+  const isPixelLength = (v: string | null): v is string => !!v && /^\d+(\.\d+)?(px)?$/.test(v.trim())
+  const widthAttr = root.getAttribute('width')
+  const heightAttr = root.getAttribute('height')
+  if (isPixelLength(widthAttr) && isPixelLength(heightAttr)) {
+    return { width: parseFloat(widthAttr), height: parseFloat(heightAttr) }
+  }
+
+  const viewBox = root.getAttribute('viewBox')
+  if (viewBox) {
+    const parts = viewBox.trim().split(/[\s,]+/).map(Number)
+    if (parts.length === 4 && parts.every(Number.isFinite) && parts[2] > 0 && parts[3] > 0) {
+      return { width: parts[2], height: parts[3] }
+    }
+  }
+  return null
 }
 
 async function decodeTiff(file: File): Promise<{ canvas: HTMLCanvasElement; width: number; height: number }> {
@@ -45,6 +61,38 @@ async function decodeTiff(file: File): Promise<{ canvas: HTMLCanvasElement; widt
   return { canvas, width, height }
 }
 
+// ICO/CUR files can embed each image as either a complete PNG file, or as a
+// raw DIB (BITMAPINFOHEADER + palette + pixel data) with NO leading
+// BITMAPFILEHEADER — that 14-byte header is what a standalone .bmp file
+// needs and is intentionally omitted from ICO entries since the icon
+// directory entry already carries the size/offset. The DIB's declared
+// height is also doubled versus the real image height (it accounts for the
+// XOR color image stacked above an AND transparency mask). Passing that raw
+// data straight to createImageBitmap with type image/bmp is not a valid BMP
+// file and fails to decode; this reconstructs one.
+function buildStandaloneBmp(dib: Uint8Array, realHeight: number): Uint8Array {
+  const dibView = new DataView(dib.buffer, dib.byteOffset, dib.byteLength)
+  const dibHeaderSize = dibView.getUint32(0, true) || 40
+  const bpp = dibView.getUint16(14, true)
+  const colorsUsed = dibView.getUint32(32, true)
+  const paletteEntries = bpp <= 8 ? (colorsUsed || (1 << bpp)) : 0
+  const pixelDataOffset = 14 + dibHeaderSize + paletteEntries * 4
+
+  // Correct the doubled height so a standard BMP decoder computes the right
+  // number of pixel rows instead of reading past the real image data.
+  const fixedDib = new Uint8Array(dib)
+  new DataView(fixedDib.buffer).setInt32(8, realHeight, true)
+
+  const out = new Uint8Array(14 + fixedDib.length)
+  const view = new DataView(out.buffer)
+  out[0] = 0x42; out[1] = 0x4d // 'BM'
+  view.setUint32(2, out.length, true) // total file size
+  view.setUint32(6, 0, true) // reserved
+  view.setUint32(10, pixelDataOffset, true) // pixel data offset
+  out.set(fixedDib, 14)
+  return out
+}
+
 async function decodeIco(file: File): Promise<{ canvas: HTMLCanvasElement; width: number; height: number }> {
   const buffer = new Uint8Array(await fileToArrayBuffer(file))
   const view = new DataView(buffer.buffer)
@@ -57,11 +105,13 @@ async function decodeIco(file: File): Promise<{ canvas: HTMLCanvasElement; width
     if (w * h > bestSize) { bestSize = w * h; bestIdx = i }
   }
   const base = 6 + bestIdx * 16
+  const iconHeight = buffer[base + 1] || 256
   const dataSize = view.getUint32(base + 8, true)
   const dataOffset = view.getUint32(base + 12, true)
   const imageBytes = buffer.subarray(dataOffset, dataOffset + dataSize)
   const isPng = imageBytes[0] === 0x89 && imageBytes[1] === 0x50
-  const blob = new Blob([imageBytes], { type: isPng ? 'image/png' : 'image/bmp' })
+  const blobBytes: Uint8Array = isPng ? imageBytes : buildStandaloneBmp(imageBytes, iconHeight)
+  const blob = new Blob([blobBytes as BlobPart], { type: isPng ? 'image/png' : 'image/bmp' })
   const bitmap = await createImageBitmap(blob)
   const { width, height } = bitmap
   const canvas = document.createElement('canvas')
@@ -74,15 +124,23 @@ async function decodeIco(file: File): Promise<{ canvas: HTMLCanvasElement; width
 async function loadImageElement(file: File): Promise<{ img: HTMLImageElement; width: number; height: number }> {
   const isSvg = file.type === 'image/svg+xml' || file.name.toLowerCase().endsWith('.svg')
   const svgText = isSvg ? await file.text() : null
-  const explicitSize = svgText ? parseSvgExplicitSize(svgText) : null
-  const fallbackSize = svgText ? parseSvgViewBoxSize(svgText) : null
+  const intrinsicSize = svgText ? parseSvgIntrinsicSize(svgText) : null
   const naturalScale = isSvg ? 2 : 1
   const objectUrl = URL.createObjectURL(file)
   return new Promise((resolve, reject) => {
     const img = new Image()
     img.onload = () => {
-      let width = img.naturalWidth || explicitSize?.width || fallbackSize?.width || 800
-      let height = img.naturalHeight || explicitSize?.height || fallbackSize?.height || 600
+      // Prefer the SVG's own declared size (from width/height, or viewBox
+      // as a fallback) over the browser's loaded natural size. The two
+      // only disagree for viewBox-only SVGs with no explicit width/height:
+      // per the CSS default-sizing algorithm, browsers fit that SVG's
+      // aspect ratio into their own default concrete size rather than
+      // using the viewBox's own units, so naturalWidth/Height there
+      // reflects a browser convention, not the author's intended
+      // dimensions — producing an unexpectedly different resolution than
+      // the source implies (e.g. a 24×24 icon rasterizing at 150×150).
+      let width = intrinsicSize?.width || img.naturalWidth || 800
+      let height = intrinsicSize?.height || img.naturalHeight || 600
       width = Math.round(width * naturalScale)
       height = Math.round(height * naturalScale)
       URL.revokeObjectURL(objectUrl)
@@ -123,19 +181,31 @@ function canvasToBlob(canvas: HTMLCanvasElement, mime: string, quality?: number)
     ))
 }
 
-async function canvasToGif(canvas: HTMLCanvasElement, width: number, height: number): Promise<Blob> {
+async function canvasToGif(canvas: HTMLCanvasElement, width: number, height: number, preserveAlpha: boolean): Promise<Blob> {
   const { GIFEncoder, quantize, applyPalette } = await import('gifenc')
   const ctx = canvas.getContext('2d')!
   const imageData = ctx.getImageData(0, 0, width, height)
-  const palette = quantize(imageData.data, 256)
-  const indexed = applyPalette(imageData.data, palette)
+  // GIF supports (binary) transparency, unlike JPEG/BMP — quantizing with
+  // 'rgba4444' + oneBitAlpha keeps a transparent palette entry instead of
+  // always flattening alpha to opaque, which is what silently turned a
+  // transparent PNG's background solid white/black on every GIF conversion
+  // before (drawToCanvas was always called with fillWhite=true for GIF).
+  const palette = preserveAlpha
+    ? quantize(imageData.data, 256, { format: 'rgba4444', oneBitAlpha: true })
+    : quantize(imageData.data, 256)
+  const indexed = applyPalette(imageData.data, palette, preserveAlpha ? 'rgba4444' : 'rgb565')
   const gif = GIFEncoder()
-  gif.writeFrame(indexed, width, height, { palette })
+  const transparentIndex = preserveAlpha ? palette.findIndex((c) => c[3] === 0) : -1
+  gif.writeFrame(indexed, width, height, {
+    palette,
+    ...(transparentIndex >= 0 ? { transparent: true, transparentIndex } : {}),
+  })
   gif.finish()
   return new Blob([gif.bytesView()], { type: 'image/gif' })
 }
 
-export async function convertImage(file: File, outputFormat: string): Promise<Blob> {
+export async function convertImage(file: File, outputFormat: string, signal?: AbortSignal): Promise<Blob> {
+  signal?.throwIfAborted()
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
 
   // ── Special-decoder path (TIFF, ICO, CUR) ───────────────────────────────────
@@ -151,7 +221,7 @@ export async function convertImage(file: File, outputFormat: string): Promise<Bl
     if (outputFormat === 'ico') return canvasToIco(srcCanvas, width, height)
     if (outputFormat === 'cur') return canvasToCur(srcCanvas, width, height)
     if (outputFormat === 'tiff') return canvasToTiff(srcCanvas, width, height)
-    if (outputFormat === 'gif') return canvasToGif(srcCanvas, width, height)
+    if (outputFormat === 'gif') return canvasToGif(srcCanvas, width, height, true)
     const targetMime = MIME_MAP[outputFormat]
     if (!targetMime) throw new Error(`Unsupported image output format: ${outputFormat}`)
     const fillWhite = ['jpeg', 'jpg', 'bmp'].includes(outputFormat)
@@ -166,7 +236,7 @@ export async function convertImage(file: File, outputFormat: string): Promise<Bl
   if (outputFormat === 'ico') return convertToIco(img, width, height)
   if (outputFormat === 'cur') return convertToCur(img, width, height)
   if (outputFormat === 'tiff') return convertToTiff(img, width, height)
-  if (outputFormat === 'gif') return canvasToGif(drawToCanvas(img, width, height, true), width, height)
+  if (outputFormat === 'gif') return canvasToGif(drawToCanvas(img, width, height, false), width, height, true)
   const targetMime = MIME_MAP[outputFormat]
   if (!targetMime) throw new Error(`Unsupported image output format: ${outputFormat}`)
   const quality = ['jpeg', 'jpg', 'webp', 'avif'].includes(outputFormat) ? 0.92 : undefined
